@@ -1,0 +1,13 @@
+{
+  "catalogs": {},
+  "aliases": {
+    "github-worker": {
+      "script-ref": "GitHubWorker.java",
+      "description": "House Elf that fixes GitHub issues and reviews PRs using Claude Code"
+    },
+    "github-worker-ui": {
+      "script-ref": "GitHubWorkerUI.java",
+      "description": "House Elves dashboard for monitoring and controlling github-worker"
+    }
+  }
+}

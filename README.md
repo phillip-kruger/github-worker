@@ -32,46 +32,46 @@ You also need a PAT for your own account (used for reading your issue assignment
 
 ## Install
 
+### Quick install (via JBang)
+
 ```bash
-git clone <this-repo>
+# Install the worker
+jbang app install github-worker@House-elves/github-worker
+
+# Interactive setup (prompts for tokens, email, schedule)
+github-worker --install
+
+# Install the dashboard (optional)
+jbang app install github-worker-ui@House-elves/github-worker
+
+# Set up the dashboard as a service
+github-worker-ui --install
+```
+
+That's it. Both tools are on your PATH, scheduled to run automatically, and survive restarts.
+
+### Manual install (from source)
+
+```bash
+git clone https://github.com/House-elves/github-worker.git
 cd github-worker
 ./install.sh
 ```
 
-The installer will:
+### Dashboard
 
-1. Check prerequisites (java, jbang, gh, claude)
-2. Prompt for your configuration:
-   - Your GitHub username and PAT
-   - Bot GitHub username and PAT
-   - Gmail credentials for notifications
-   - Schedule, active hours, excluded orgs
-3. Write config to `~/.config/github-worker/config` (chmod 600)
-4. Install the JBang sources to `~/.local/share/github-worker/`
-5. Create a wrapper script at `~/.local/bin/github-worker`
-6. Set up the scheduler:
-   - **Linux**: systemd user timer + lingering enabled
-   - **macOS**: launchd plist in `~/Library/LaunchAgents/`
-7. Offer a preview test run
+The dashboard is a Quarkus web app that monitors and controls the worker. After installing with `github-worker-ui --install`, it's available at:
 
-### Dashboard (optional)
+- **http://github-worker.house-elves:7478** (if hostname was added to `/etc/hosts`)
+- **http://localhost:7478**
 
-A web dashboard is available in the companion `github-worker-ui/` project:
-
-```bash
-cd ../github-worker-ui
-./install.sh
-```
-
-This installs a Quarkus app that serves a monitoring dashboard at `http://github-worker.house-elves:7478` with:
+Features:
 
 - Live state view of tracked issues and reviews
 - State machine flow visualization
 - Systemd log viewer
 - Trigger and preview buttons
 - Config editor
-
-The installer builds the app, installs it as a systemd/launchd service, and optionally adds a local hostname to `/etc/hosts`.
 
 ## Configuration
 
