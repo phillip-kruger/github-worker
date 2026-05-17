@@ -496,11 +496,16 @@ public class GitHubClient {
         ghText(Actor.BOT, "repo", "fork", ownerRepo, "--default-branch-only");
 
         String forkRepo = config.botUser + "/" + ownerRepo.split("/")[1];
+        String httpsOrigin = "https://x-access-token:" + config.botToken + "@github.com/" + forkRepo + ".git";
+        String httpsUpstream = "https://github.com/" + ownerRepo + ".git";
+
         if (ghExitCode(Actor.BOT, "repo", "clone", forkRepo, mainDir.toString()) != 0) {
             return null;
         }
 
-        git(Actor.BOT, mainDir, "remote", "add", "upstream", "https://github.com/" + ownerRepo + ".git");
+        // Switch origin to HTTPS with embedded token so git push works
+        git(Actor.BOT, mainDir, "remote", "set-url", "origin", httpsOrigin);
+        git(Actor.BOT, mainDir, "remote", "add", "upstream", httpsUpstream);
 
         String defaultBranch = getDefaultBranch(ownerRepo);
         git(Actor.BOT, mainDir, "fetch", "upstream", defaultBranch);
