@@ -536,6 +536,9 @@ public class GitHubClient {
         String defaultBranch = getDefaultBranch(ownerRepo);
         String branch = "fix/" + issueNumber;
 
+        // Delete stale branch from a previous attempt if it exists
+        git(Actor.BOT, mainDir, "branch", "-D", branch);
+
         java.nio.file.Files.createDirectories(wtDir.getParent());
         String result = git(Actor.BOT, mainDir,
                 "worktree", "add", wtDir.toAbsolutePath().toString(),
@@ -585,7 +588,8 @@ public class GitHubClient {
 
         removeWorktree(mainDir, wtDir);
 
-        // Fetch the PR ref
+        // Delete stale PR branch and fetch fresh
+        git(Actor.USER, mainDir, "branch", "-D", "pr-" + prNumber);
         git(Actor.USER, mainDir, "fetch", "origin", "pull/" + prNumber + "/head:pr-" + prNumber);
 
         java.nio.file.Files.createDirectories(wtDir.getParent());

@@ -234,7 +234,7 @@ public class GitHubWorker implements Callable<Integer> {
         }
 
         // 5. Send email summary
-        if (!results.isEmpty() && !dryRun) {
+        if (!results.isEmpty() && !dryRun && config.emailNotifications) {
             System.out.println("\nSending summary email...");
             notifier.sendSummary(results);
         }

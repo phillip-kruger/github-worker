@@ -26,6 +26,7 @@ public class Config {
     Path workDir;
     int lookbackDays;
     String agent;
+    boolean emailNotifications;
 
     static Config load() {
         if (!Files.exists(CONFIG_PATH)) {
@@ -63,6 +64,7 @@ public class Config {
         c.workDir = Path.of(raw.getOrDefault("WORK_DIR", "/tmp/github-worker"));
         c.lookbackDays = Integer.parseInt(raw.getOrDefault("LOOKBACK_DAYS", "7"));
         c.agent = raw.getOrDefault("AGENT", "claude");
+        c.emailNotifications = !"false".equalsIgnoreCase(raw.getOrDefault("EMAIL_NOTIFICATIONS", "true"));
         return c;
     }
 
@@ -71,7 +73,7 @@ public class Config {
         requireField("GITHUB_TOKEN", githubToken);
         requireField("BOT_USER", botUser);
         requireField("BOT_TOKEN", botToken);
-        if (requireEmail) {
+        if (requireEmail && emailNotifications) {
             requireField("GMAIL_ADDRESS", gmailAddress);
             requireField("GMAIL_APP_PASSWORD", gmailAppPassword);
             requireField("SEND_TO", sendTo);

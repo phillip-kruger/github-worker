@@ -67,7 +67,7 @@ public class IssueWorkflow {
 
         if (!triage.safe()) {
             System.out.println("  FLAGGED: " + triage.explanation());
-            if (!dryRun) {
+            if (!dryRun && config.emailNotifications) {
                 notifier.sendSecurityWarning(ownerRepo, issueNumber, entry.title,
                         "https://github.com/" + ownerRepo + "/issues/" + issueNumber,
                         triage.explanation());
