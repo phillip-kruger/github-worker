@@ -1,8 +1,8 @@
 public class SecurityTriage {
 
-    private final ClaudeRunner claude;
+    private final CodingAgent claude;
 
-    SecurityTriage(ClaudeRunner claude) {
+    SecurityTriage(CodingAgent claude) {
         this.claude = claude;
     }
 

@@ -4,11 +4,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
-public class ClaudeRunner {
+public class ClaudeAgent implements CodingAgent {
 
     private static final Path EMPTY_MCP_CONFIG = Path.of("/tmp/github-worker-empty-mcp.json");
 
-    String run(String prompt, Path workDir, int timeoutMinutes) {
+    @Override
+    public String run(String prompt, Path workDir, int timeoutMinutes) {
         try {
             ProcessBuilder pb = new ProcessBuilder(
                     "claude", "-p",
@@ -22,11 +23,8 @@ public class ClaudeRunner {
         }
     }
 
-    String run(String prompt, Path workDir) {
-        return run(prompt, workDir, 30);
-    }
-
-    String runBare(String prompt, int timeoutSeconds) {
+    @Override
+    public String runBare(String prompt, int timeoutSeconds) {
         try {
             ensureEmptyMcpConfig();
             ProcessBuilder pb = new ProcessBuilder(
@@ -39,10 +37,6 @@ public class ClaudeRunner {
             System.err.println("  Claude (bare) failed: " + e.getMessage());
             return null;
         }
-    }
-
-    String runBare(String prompt) {
-        return runBare(prompt, 120);
     }
 
     private String execute(ProcessBuilder pb, String prompt, int timeoutMinutes) throws IOException, InterruptedException {

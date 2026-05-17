@@ -6,11 +6,11 @@ import java.time.Instant;
 public class ReviewWorkflow {
 
     private final GitHubClient gh;
-    private final ClaudeRunner claude;
+    private final CodingAgent claude;
     private final Config config;
     private final boolean dryRun;
 
-    ReviewWorkflow(GitHubClient gh, ClaudeRunner claude, Config config, boolean dryRun) {
+    ReviewWorkflow(GitHubClient gh, CodingAgent claude, Config config, boolean dryRun) {
         this.gh = gh;
         this.claude = claude;
         this.config = config;

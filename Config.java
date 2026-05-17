@@ -25,6 +25,7 @@ public class Config {
     String activeHours;
     Path workDir;
     int lookbackDays;
+    String agent;
 
     static Config load() {
         if (!Files.exists(CONFIG_PATH)) {
@@ -61,6 +62,7 @@ public class Config {
         c.activeHours = raw.getOrDefault("ACTIVE_HOURS", "08-18");
         c.workDir = Path.of(raw.getOrDefault("WORK_DIR", "/tmp/github-worker"));
         c.lookbackDays = Integer.parseInt(raw.getOrDefault("LOOKBACK_DAYS", "7"));
+        c.agent = raw.getOrDefault("AGENT", "claude");
         return c;
     }
 

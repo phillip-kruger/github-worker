@@ -9,13 +9,13 @@ public class IssueWorkflow {
     private static final int MAX_ATTEMPTS = 3;
 
     private final GitHubClient gh;
-    private final ClaudeRunner claude;
+    private final CodingAgent claude;
     private final SecurityTriage security;
     private final Notifier notifier;
     private final Config config;
     private final boolean dryRun;
 
-    IssueWorkflow(GitHubClient gh, ClaudeRunner claude, SecurityTriage security,
+    IssueWorkflow(GitHubClient gh, CodingAgent claude, SecurityTriage security,
                   Notifier notifier, Config config, boolean dryRun) {
         this.gh = gh;
         this.claude = claude;

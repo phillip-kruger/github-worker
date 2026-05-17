@@ -5,7 +5,8 @@
 //DEPS org.eclipse.angus:angus-mail:2.0.3
 //SOURCES Config.java
 //SOURCES GitHubClient.java
-//SOURCES ClaudeRunner.java
+//SOURCES CodingAgent.java
+//SOURCES ClaudeAgent.java
 //SOURCES IssueWorkflow.java
 //SOURCES ReviewWorkflow.java
 //SOURCES WorkflowState.java
@@ -79,7 +80,7 @@ public class GitHubWorker implements Callable<Integer> {
         }
 
         GitHubClient gh = new GitHubClient(config);
-        ClaudeRunner claude = new ClaudeRunner();
+        CodingAgent claude = CodingAgent.create(config);
         SecurityTriage security = new SecurityTriage(claude);
         Notifier notifier = new Notifier(config);
         IssueWorkflow issueWorkflow = new IssueWorkflow(gh, claude, security, notifier, config, dryRun);

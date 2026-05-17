@@ -89,6 +89,7 @@ Stored in `~/.config/github-worker/config`:
 | `WORK_DIR` | Directory for worktrees and clones | `/tmp/github-worker` |
 | `LOOKBACK_DAYS` | How far back to search for issues | `7` |
 | `SCHEDULE` | Cron expression (e.g. `*/5 * * * *`) | `0 * * * *` |
+| `AGENT` | Coding agent to use (see below) | `claude` |
 
 Config can also be edited from the dashboard UI.
 
@@ -128,15 +129,70 @@ Instead of cloning repos from scratch each time, the worker maintains a persiste
 
 For Maven/Quarkus projects, each worktree gets an isolated `.m2` directory via `.mvn/maven.config`, so SNAPSHOT builds don't pollute each other.
 
-### Claude Code integration
+### Coding agents
 
-The bot invokes Claude Code CLI (`claude -p --dangerously-skip-permissions`) with full access to all configured MCP servers and skills. This means the bot can use:
+The worker delegates all AI coding tasks to a pluggable `CodingAgent` interface. Claude Code CLI is the default, but other agents can be used by setting `AGENT` in the config.
 
-- Quarkus Agent MCP server (for building, testing, managing extensions)
-- Any other MCP servers you have configured
-- All Claude Code skills
+**Built-in agents:**
 
-The only exception is security triage, which runs in bare mode with no filesystem access.
+| Agent | Config value | CLI tool | Description |
+|-------|-------------|----------|-------------|
+| Claude Code | `claude` (default) | `claude` | Full MCP server and skill access |
+
+To switch agents, set `AGENT=agent-name` in `~/.config/github-worker/config`.
+
+When using Claude Code (the default), the bot invokes `claude -p --dangerously-skip-permissions` with full access to all configured MCP servers and skills — Quarkus Agent, Chrome DevTools, etc. The only exception is security triage, which runs in a sandboxed mode with no filesystem access.
+
+### Implementing a custom agent
+
+The `CodingAgent` interface has two methods:
+
+```java
+public interface CodingAgent {
+    // Full mode — agent works in a git checkout, can read/write files,
+    // run builds, make commits
+    String run(String prompt, Path workDir, int timeoutMinutes);
+
+    // Bare mode — analysis only, NO filesystem access
+    // Used for security triage and text generation
+    String runBare(String prompt, int timeoutSeconds);
+}
+```
+
+To add a new agent:
+
+1. Create a new class implementing `CodingAgent` (e.g. `CodexAgent.java`):
+
+```java
+public class CodexAgent implements CodingAgent {
+    @Override
+    public String run(String prompt, Path workDir, int timeoutMinutes) {
+        // Build the CLI command for your agent
+        ProcessBuilder pb = new ProcessBuilder("your-agent", "--flags");
+        pb.directory(workDir.toFile());
+        // Write prompt to stdin, read stdout, handle timeout
+        // Return the agent's text output, or null on failure
+    }
+
+    @Override
+    public String runBare(String prompt, int timeoutSeconds) {
+        // Same but with no filesystem access
+        // For agents that don't have a sandboxed mode,
+        // you can use a temp empty directory as workDir
+    }
+}
+```
+
+2. Add a `//SOURCES CodexAgent.java` line in `GitHubWorker.java`
+3. Add a case in `CodingAgent.create()`:
+
+```java
+case "codex" -> new CodexAgent();
+```
+
+4. Set `AGENT=codex` in the config
+
+The agent receives prompts as plain text containing full context (issue details, diffs, review findings, commit message rules) and returns plain text output. The worker doesn't parse the agent's output structurally — it only checks for specific phrases like "No issues found." in review responses.
 
 ## Issue workflow
 
