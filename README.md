@@ -1,0 +1,288 @@
+# github-worker
+
+A House Elf that fixes GitHub issues and reviews PRs using [Claude Code](https://claude.com/claude-code). It runs on a schedule, uses a dedicated bot account for all automated actions, and advances one step per run through a multi-stage stateful workflow.
+
+Built with Java/JBang for the Quarkus team. Works on Linux and macOS. Survives restarts.
+
+## Prerequisites
+
+- **Java 17+** (via SDKMAN or system package manager)
+- **[JBang](https://www.jbang.dev/)** — `sdk install jbang` or `curl -Ls https://sh.jbang.dev | bash`
+- **[GitHub CLI](https://cli.github.com/)** (`gh`) — authenticated with `gh auth login`
+- **[Claude Code CLI](https://claude.com/claude-code)** (`claude`)
+- **Gmail account** with an [App Password](https://myaccount.google.com/apppasswords) (for email notifications)
+- **A bot GitHub account** with its own Personal Access Token
+
+### Creating a bot GitHub account
+
+1. Create a new GitHub account (e.g. `yourname-bot`)
+2. Create a Personal Access Token for the bot:
+   - Log in as the bot account
+   - Go to https://github.com/settings/tokens/new?scopes=repo,read:org,write:discussion&description=github-worker-bot
+   - Select scopes: `repo`, `read:org`, `write:discussion`
+   - Copy the token — you'll need it during install
+
+### Creating your own PAT
+
+You also need a PAT for your own account (used for reading your issue assignments and reactions):
+
+- Go to https://github.com/settings/tokens/new?scopes=repo,read:org&description=github-worker
+- Select scopes: `repo`, `read:org`
+- Copy the token
+
+## Install
+
+```bash
+git clone <this-repo>
+cd github-worker
+./install.sh
+```
+
+The installer will:
+
+1. Check prerequisites (java, jbang, gh, claude)
+2. Prompt for your configuration:
+   - Your GitHub username and PAT
+   - Bot GitHub username and PAT
+   - Gmail credentials for notifications
+   - Schedule, active hours, excluded orgs
+3. Write config to `~/.config/github-worker/config` (chmod 600)
+4. Install the JBang sources to `~/.local/share/github-worker/`
+5. Create a wrapper script at `~/.local/bin/github-worker`
+6. Set up the scheduler:
+   - **Linux**: systemd user timer + lingering enabled
+   - **macOS**: launchd plist in `~/Library/LaunchAgents/`
+7. Offer a preview test run
+
+### Dashboard (optional)
+
+A web dashboard is available in the companion `github-worker-ui/` project:
+
+```bash
+cd ../github-worker-ui
+./install.sh
+```
+
+This installs a Quarkus app that serves a monitoring dashboard at `http://github-worker.house-elves:7478` with:
+
+- Live state view of tracked issues and reviews
+- State machine flow visualization
+- Systemd log viewer
+- Trigger and preview buttons
+- Config editor
+
+The installer builds the app, installs it as a systemd/launchd service, and optionally adds a local hostname to `/etc/hosts`.
+
+## Configuration
+
+Stored in `~/.config/github-worker/config`:
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `GITHUB_USER` | Your GitHub username | — |
+| `GITHUB_TOKEN` | Your GitHub Personal Access Token | — |
+| `BOT_USER` | Bot GitHub username | — |
+| `BOT_TOKEN` | Bot GitHub Personal Access Token | — |
+| `EXCLUDE_ORGS` | Comma-separated orgs to skip | — |
+| `GMAIL_ADDRESS` | Gmail sender address | — |
+| `GMAIL_APP_PASSWORD` | Gmail App Password | — |
+| `SEND_TO` | Email recipients (comma-separated) | — |
+| `ACTIVE_HOURS` | Hours to run (24h, e.g. `07-22`) | `07-22` |
+| `WORK_DIR` | Directory for worktrees and clones | `/tmp/github-worker` |
+| `LOOKBACK_DAYS` | How far back to search for issues | `7` |
+| `SCHEDULE` | Cron expression (e.g. `*/5 * * * *`) | `0 * * * *` |
+
+Config can also be edited from the dashboard UI.
+
+## Usage
+
+```bash
+# Preview — show eligible issues and reviews without processing
+github-worker --preview
+
+# Show current tracking state
+github-worker --status
+
+# Normal run — advance each tracked item by one step
+github-worker
+
+# Process exactly one item then exit
+github-worker --once
+
+# Full logic but skip all write operations
+github-worker --dry-run
+```
+
+Or use the dashboard at `http://github-worker.house-elves:7478` to trigger runs and monitor progress.
+
+## How it works
+
+The worker uses two GitHub accounts:
+
+- **Your account** — for reading (assigned issues, reactions, review requests, CI status)
+- **Bot account** — for all actions (comments, PRs, reviews, pushes)
+
+This makes it clear in the GitHub UI which actions are automated. The bot's PRs and comments are visually distinct from yours.
+
+### Git worktrees
+
+Instead of cloning repos from scratch each time, the worker maintains a persistent main clone per repo under `{WORK_DIR}/repos/`. For each issue, it creates a lightweight git worktree under `{WORK_DIR}/worktrees/`. This is fast (instant after the first clone) and disk-efficient (shared git object database).
+
+For Maven/Quarkus projects, each worktree gets an isolated `.m2` directory via `.mvn/maven.config`, so SNAPSHOT builds don't pollute each other.
+
+### Claude Code integration
+
+The bot invokes Claude Code CLI (`claude -p --dangerously-skip-permissions`) with full access to all configured MCP servers and skills. This means the bot can use:
+
+- Quarkus Agent MCP server (for building, testing, managing extensions)
+- Any other MCP servers you have configured
+- All Claude Code skills
+
+The only exception is security triage, which runs in bare mode with no filesystem access.
+
+## Issue workflow
+
+When you signal intent to work on an issue, the worker picks it up and progresses through these stages — one step per scheduled run:
+
+### How to signal intent
+
+| Signal | When |
+|--------|------|
+| Self-assign an issue | You assigned it to yourself |
+| React with 👀 on an issue | Someone else assigned you — 👀 confirms you want the bot to help |
+
+### Stages
+
+```
+NEW ──► AWAITING_APPROVAL ──► CODING ──► SELF_REVIEWING
+ │           │                                │
+ │     👍 proceed                    issues? ──┤── clean?
+ │     👎 retry (max 3)                │            │
+ │                              FIXING_REVIEW   READY_FOR_REVIEW
+ │                                    │              │
+ │                                    └──────────────┤
+ │                                                   │
+ │                                    comments? ─────┤── approved?
+ │                                        │               │
+ │                                 ADDRESSING_FEEDBACK  SQUASHING
+ │                                        │               │
+ │                                        └──────┐   MONITORING_CI
+ │                                               │        │
+ │                                               │   pass?─┤─ fail?
+ │                                               │    │         │
+ │                                               │   DONE    FIXING_CI
+ │                                               │              │
+ └───────────────────────────────────────────────┴──────────────┘
+```
+
+**1. NEW** — The bot analyzes the issue and posts a comment on it summarizing its understanding and proposed approach. It mentions you (e.g., "@you Does this look right? React with 👍 to proceed or 👎 if I should reconsider.").
+
+**2. AWAITING_APPROVAL** — The bot checks its comment for your reaction:
+- 👍 — proceed to coding
+- 👎 — the bot reads your follow-up comment (if any) as feedback and re-analyzes (up to 3 attempts)
+- No reaction — stays here, checked again next run
+
+**3. CODING** — The bot creates a worktree, runs Claude Code to implement the fix, pushes to its fork, and creates a **draft PR** linking to the issue.
+
+**4. SELF_REVIEWING** — The bot reviews its own PR for correctness, test coverage, documentation, security, maintainability, and Quarkus patterns. If it finds issues, it moves to FIXING_REVIEW. If clean, it marks the PR ready and adds you as reviewer.
+
+**5. FIXING_REVIEW** — The bot fixes all self-review findings, squashes to one commit, marks the PR ready for review, and adds you as reviewer.
+
+**6. READY_FOR_REVIEW** — The bot monitors the PR for your response:
+- **You comment** — moves to ADDRESSING_FEEDBACK
+- **You approve** — moves to SQUASHING
+- **Neither** — stays here
+
+**7. ADDRESSING_FEEDBACK** — The bot processes your comments, makes changes, squashes, force-pushes, reacts 👍 on each processed comment, and re-requests your review.
+
+**8. SQUASHING** — The bot squashes all commits into a single clean commit.
+
+**9. MONITORING_CI** — The bot checks CI status:
+- All checks pass → **DONE**
+- Any check fails → **FIXING_CI**
+- Checks still running → stays here
+
+**10. FIXING_CI** — The bot investigates CI failures, fixes them, pushes, and re-requests your review. Up to 3 attempts. If it can't fix CI after 3 tries, it posts a comment and gives up.
+
+**11. DONE** — CI is green or you merged the PR. The entry stays in state for the summary email, then gets pruned after `LOOKBACK_DAYS`.
+
+## Review workflow
+
+When you're requested as a reviewer on a PR, the bot can do the review for you.
+
+### How to signal intent
+
+| Signal | When |
+|--------|------|
+| Self-request as reviewer | You added yourself as reviewer |
+| React with 👀 on the PR | Someone else requested you — 👀 confirms you want the bot to review |
+
+### Stages
+
+**1. NEW** — The bot clones the PR, runs Claude Code for a comprehensive review covering:
+- Correctness and completeness
+- Test coverage
+- Documentation updates
+- Security implications
+- Code quality and maintainability
+- Quarkus-specific patterns and conventions
+
+**2. REVIEW_POSTED** — The review is posted as the bot account on the PR. Each finding is tagged with severity: `[CRITICAL]`, `[SUGGESTION]`, or `[NIT]`.
+
+**3. DONE** — One-shot workflow, no further action needed.
+
+## Safety
+
+- **Security triage** — every issue is analyzed for malicious content (shell injection, obfuscated payloads, social engineering) before any code is executed. Suspicious issues are flagged via email and skipped.
+- **Lock file** — prevents overlapping runs if a step takes longer than the schedule interval
+- **Retry limits** — max 3 attempts on understanding loops (👎) and CI fix loops
+- **Bot account isolation** — all automated actions come from the bot account, never yours
+- **Active hours** — the worker only runs during configured hours
+- **Draft PRs** — code changes always start as draft PRs; you always have final say
+
+## State
+
+The worker persists its state in `~/.config/github-worker/state.json`. Each scheduled run:
+
+1. Discovers new eligible issues and review requests
+2. Advances each tracked item by exactly one step
+3. Saves state atomically (write to tmp file, rename)
+
+State entries in DONE are automatically pruned after `LOOKBACK_DAYS`.
+
+To inspect state from the command line: `github-worker --status`
+
+## Troubleshooting
+
+### Check service status
+
+```bash
+# Linux
+systemctl --user status github-worker.timer
+systemctl --user status github-worker-ui.service
+
+# View recent logs
+journalctl --user-unit github-worker -n 50
+```
+
+### Force a run
+
+```bash
+github-worker --once
+```
+
+Or click "Trigger Now" in the dashboard.
+
+### Reset state for an issue
+
+Edit `~/.config/github-worker/state.json` and remove the entry, or change its `state` field.
+
+### The worker skips an issue I expect it to pick up
+
+- Check that the issue is assigned to your `GITHUB_USER`
+- Check that you either self-assigned it or added a 👀 reaction
+- Check that the issue's org is not in `EXCLUDE_ORGS`
+- Check that the issue was created within `LOOKBACK_DAYS`
+- Check that no `fix/{issueNumber}` PR already exists from the bot
+
+Run `github-worker --preview` to see what the worker finds.
