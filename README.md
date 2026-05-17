@@ -2,8 +2,6 @@
 
 A House Elf that fixes GitHub issues and reviews PRs using [Claude Code](https://claude.com/claude-code). It runs on a schedule, uses a dedicated bot account for all automated actions, and advances one step per run through a multi-stage stateful workflow.
 
-Built with Java/JBang for the Quarkus team. Works on Linux and macOS. Survives restarts.
-
 ## Prerequisites
 
 - **Java 17+** (via SDKMAN or system package manager)
