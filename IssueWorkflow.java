@@ -621,6 +621,12 @@ public class IssueWorkflow {
                 return WorkflowState.IssueState.SQUASHING;
             }
 
+            // Fetch latest upstream before squashing to avoid stale changes
+            gh.git(GitHubClient.Actor.BOT, repoDir, "fetch", "upstream", defaultBranch);
+
+            // Rebase on upstream to ensure we only have our changes
+            gh.git(GitHubClient.Actor.BOT, repoDir, "rebase", "upstream/" + defaultBranch);
+
             String commitMsg = gh.git(GitHubClient.Actor.BOT, repoDir, "log", "--format=%s", "-1");
             if (commitMsg == null || commitMsg.isEmpty()) commitMsg = entry.title;
 

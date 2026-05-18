@@ -691,7 +691,9 @@ public class GitHubClient {
         removeWorktree(mainDir, wtDir);
 
         String branch = "fix/" + issueNumber;
+        String defaultBranch = getDefaultBranch(ownerRepo);
 
+        git(Actor.BOT, mainDir, "fetch", "upstream", defaultBranch);
         git(Actor.BOT, mainDir, "fetch", "origin", branch);
 
         java.nio.file.Files.createDirectories(wtDir.getParent());
