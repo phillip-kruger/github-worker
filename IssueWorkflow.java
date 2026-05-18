@@ -471,10 +471,18 @@ public class IssueWorkflow {
             return WorkflowState.IssueState.READY_FOR_REVIEW;
         }
 
-        if (gh.isPRApprovedByUser(ownerRepo, entry.prNumber)) {
+        GitHubClient.ReviewVerdict verdict = gh.getUserReviewVerdict(ownerRepo, entry.prNumber);
+
+        if (verdict == GitHubClient.ReviewVerdict.APPROVED) {
             System.out.println("  PR approved — moving to squash.");
             entry.lastUpdated = Instant.now();
             return WorkflowState.IssueState.SQUASHING;
+        }
+
+        if (verdict == GitHubClient.ReviewVerdict.CHANGES_REQUESTED) {
+            System.out.println("  Changes requested — addressing feedback.");
+            entry.lastUpdated = Instant.now();
+            return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
         }
 
         List<JsonNode> comments = gh.getUnprocessedPRComments(ownerRepo, entry.prNumber);
@@ -568,7 +576,12 @@ public class IssueWorkflow {
 
             for (JsonNode c : comments) {
                 long commentId = c.path("id").asLong();
-                gh.addReaction(ownerRepo, commentId, "+1");
+                String type = c.path("type").asText("issue");
+                if ("review".equals(type)) {
+                    gh.reactToPRComment(ownerRepo, commentId);
+                } else if ("issue".equals(type)) {
+                    gh.addReaction(ownerRepo, commentId, "+1");
+                }
             }
 
             gh.requestReview(ownerRepo, entry.prNumber, config.githubUser);

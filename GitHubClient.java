@@ -349,52 +349,107 @@ public class GitHubClient {
                 "--json", "reviews");
     }
 
-    boolean isPRApprovedByUser(String ownerRepo, int prNumber) {
+    enum ReviewVerdict { APPROVED, CHANGES_REQUESTED, NONE }
+
+    ReviewVerdict getUserReviewVerdict(String ownerRepo, int prNumber) {
         JsonNode data = getPRReviews(ownerRepo, prNumber);
-        if (data == null) return false;
+        if (data == null) return ReviewVerdict.NONE;
         JsonNode reviews = data.path("reviews");
-        if (!reviews.isArray()) return false;
+        if (!reviews.isArray()) return ReviewVerdict.NONE;
+
+        // Find the latest review from the user
+        String latestState = null;
         for (JsonNode r : reviews) {
-            if (config.githubUser.equals(r.path("author").path("login").asText())
-                    && "APPROVED".equals(r.path("state").asText())) {
-                return true;
+            if (config.githubUser.equals(r.path("author").path("login").asText())) {
+                latestState = r.path("state").asText();
             }
         }
-        return false;
+
+        if ("APPROVED".equals(latestState)) return ReviewVerdict.APPROVED;
+        if ("CHANGES_REQUESTED".equals(latestState)) return ReviewVerdict.CHANGES_REQUESTED;
+        return ReviewVerdict.NONE;
     }
 
+    /**
+     * Get all feedback from the user on a PR — both issue comments (conversation)
+     * and PR review comments (line-level), that the bot hasn't reacted 👍 to yet.
+     */
     List<JsonNode> getUnprocessedPRComments(String ownerRepo, int prNumber) {
+        List<JsonNode> unprocessed = new ArrayList<>();
+
+        // 1. Issue comments (conversation tab)
         String jq = "[.[] | select(.user.login == \"" + config.githubUser
-                + "\") | {id: .id, body: .body, created_at: .created_at}]";
+                + "\") | {id: .id, body: .body, created_at: .created_at, type: \"issue\"}]";
         String result = ghText(Actor.USER,
                 "api", "repos/" + ownerRepo + "/issues/" + prNumber + "/comments",
                 "--paginate", "--jq", jq);
-        if (result == null) return List.of();
-        try {
-            JsonNode arr = mapper.readTree(result);
-            List<JsonNode> unprocessed = new ArrayList<>();
-            for (JsonNode comment : arr) {
-                long commentId = comment.path("id").asLong();
-                String rjq = "[.[] | select(.user.login == \"" + config.botUser
-                        + "\" and .content == \"+1\")]";
-                String rResult = ghText(Actor.BOT,
-                        "api", "repos/" + ownerRepo + "/issues/comments/" + commentId + "/reactions",
-                        "--jq", rjq);
-                boolean botReacted = false;
-                if (rResult != null && !rResult.isEmpty()) {
-                    try {
-                        JsonNode rArr = mapper.readTree(rResult);
-                        botReacted = rArr.isArray() && rArr.size() > 0;
-                    } catch (Exception ignored) {
+        if (result != null) {
+            try {
+                for (JsonNode c : mapper.readTree(result)) {
+                    if (!hasBotReaction(ownerRepo, c.path("id").asLong(), "issues")) {
+                        unprocessed.add(c);
                     }
                 }
-                if (!botReacted) {
-                    unprocessed.add(comment);
-                }
+            } catch (Exception ignored) {
             }
-            return unprocessed;
+        }
+
+        // 2. PR review comments (line-level comments on the diff)
+        String jq2 = "[.[] | select(.user.login == \"" + config.githubUser
+                + "\") | {id: .id, body: .body, path: .path, created_at: .created_at, type: \"review\"}]";
+        String result2 = ghText(Actor.USER,
+                "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/comments",
+                "--paginate", "--jq", jq2);
+        if (result2 != null) {
+            try {
+                for (JsonNode c : mapper.readTree(result2)) {
+                    if (!hasBotReaction(ownerRepo, c.path("id").asLong(), "pulls")) {
+                        unprocessed.add(c);
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        // 3. PR review body text (the summary comment on a review)
+        String jq3 = "[.[] | select(.user.login == \"" + config.githubUser
+                + "\" and .body != \"\" and .body != null) | {id: .id, body: .body, state: .state}]";
+        String result3 = ghText(Actor.USER,
+                "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/reviews",
+                "--jq", jq3);
+        if (result3 != null) {
+            try {
+                for (JsonNode c : mapper.readTree(result3)) {
+                    // Include review bodies as feedback (no reaction tracking for these)
+                    unprocessed.add(c);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        return unprocessed;
+    }
+
+    void reactToPRComment(String ownerRepo, long commentId) {
+        ghText(Actor.BOT,
+                "api", "repos/" + ownerRepo + "/pulls/comments/" + commentId + "/reactions",
+                "-X", "POST",
+                "-f", "content=+1");
+    }
+
+    private boolean hasBotReaction(String ownerRepo, long commentId, String commentType) {
+        String endpoint = "issues".equals(commentType)
+                ? "repos/" + ownerRepo + "/issues/comments/" + commentId + "/reactions"
+                : "repos/" + ownerRepo + "/pulls/comments/" + commentId + "/reactions";
+        String rjq = "[.[] | select(.user.login == \"" + config.botUser
+                + "\" and .content == \"+1\")]";
+        String rResult = ghText(Actor.BOT, "api", endpoint, "--jq", rjq);
+        if (rResult == null || rResult.isEmpty()) return false;
+        try {
+            JsonNode arr = mapper.readTree(rResult);
+            return arr.isArray() && arr.size() > 0;
         } catch (Exception e) {
-            return List.of();
+            return false;
         }
     }
 
