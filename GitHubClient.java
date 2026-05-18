@@ -271,6 +271,7 @@ public class GitHubClient {
             String key = ownerRepo + "#" + number;
 
             if (config.excludeOrgs.contains(ownerRepo.split("/")[0])) continue;
+            if (!isInAllowedOrgs(ownerRepo)) continue;
             if (state.issues.containsKey(key)) continue;
             if (state.reviews.containsKey(key)) continue;
             if (results.containsKey(key)) continue;
@@ -288,6 +289,19 @@ public class GitHubClient {
             entry.matchedTopic = "mention".equals(source) ? null : source;
             results.put(key, entry);
         }
+    }
+
+    private boolean isInAllowedOrgs(String ownerRepo) {
+        if (config.orgs.isEmpty()) return true;
+        String org = ownerRepo.split("/")[0];
+        for (String scope : config.orgs) {
+            if (scope.contains("/")) {
+                if (scope.equals(ownerRepo)) return true;
+            } else {
+                if (scope.equals(org)) return true;
+            }
+        }
+        return false;
     }
 
     // --- Issue details ---
