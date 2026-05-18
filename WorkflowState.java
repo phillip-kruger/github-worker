@@ -53,8 +53,20 @@ public class WorkflowState {
         public String author;
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static class DiscoveryEntry {
+        public String title;
+        public String ownerRepo;
+        public int number;
+        public String url;
+        public String type;
+        public String source;
+        public String matchedTopic;
+    }
+
     public Map<String, IssueEntry> issues = new LinkedHashMap<>();
     public Map<String, ReviewEntry> reviews = new LinkedHashMap<>();
+    public Map<String, DiscoveryEntry> discoveries = new LinkedHashMap<>();
 
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .registerModule(new JavaTimeModule())

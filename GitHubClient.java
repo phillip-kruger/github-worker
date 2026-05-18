@@ -8,7 +8,9 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 public class GitHubClient {
@@ -217,6 +219,78 @@ public class GitHubClient {
                 "api", "repos/" + ownerRepo + "/issues/" + prNumber + "/timeline",
                 "--paginate", "--jq", jq);
         return result != null && result.replace("\"", "").trim().equals(config.githubUser);
+    }
+
+    // --- Discovery ---
+
+    List<WorkflowState.DiscoveryEntry> fetchDiscoveryItems(WorkflowState state) {
+        String since = LocalDate.now().minusDays(config.lookbackDays).format(DateTimeFormatter.ISO_DATE);
+        Map<String, WorkflowState.DiscoveryEntry> results = new LinkedHashMap<>();
+
+        // 1. Issues/PRs mentioning the user (scoped to orgs if configured)
+        for (String org : config.orgs.isEmpty() ? List.of("") : config.orgs) {
+            List<String> issueArgs = new ArrayList<>(List.of("search", "issues",
+                    "--mention", config.githubUser,
+                    "--created", ">=" + since, "--state", "open", "--limit", "20",
+                    "--json", "repository,number,title,url"));
+            if (!org.isEmpty()) issueArgs.addAll(List.of("--owner", org));
+            addDiscoveries(results, state, "issue", "mention",
+                    ghJson(Actor.USER, issueArgs.toArray(new String[0])));
+
+            List<String> prArgs = new ArrayList<>(List.of("search", "prs",
+                    "--mention", config.githubUser,
+                    "--created", ">=" + since, "--state", "open", "--limit", "20",
+                    "--json", "repository,number,title,url"));
+            if (!org.isEmpty()) prArgs.addAll(List.of("--owner", org));
+            addDiscoveries(results, state, "pr", "mention",
+                    ghJson(Actor.USER, prArgs.toArray(new String[0])));
+        }
+
+        // 2. Per-topic searches (scoped to orgs)
+        for (String topic : config.topics) {
+            for (String org : config.orgs.isEmpty() ? List.of("") : config.orgs) {
+                List<String> issueArgs = new ArrayList<>(List.of("search", "issues",
+                        topic, "--created", ">=" + since, "--state", "open", "--limit", "10",
+                        "--json", "repository,number,title,url"));
+                if (!org.isEmpty()) issueArgs.addAll(List.of("--owner", org));
+                addDiscoveries(results, state, "issue", topic,
+                        ghJson(Actor.USER, issueArgs.toArray(new String[0])));
+
+                List<String> prArgs = new ArrayList<>(List.of("search", "prs",
+                        topic, "--created", ">=" + since, "--state", "open", "--limit", "10",
+                        "--json", "repository,number,title,url"));
+                if (!org.isEmpty()) prArgs.addAll(List.of("--owner", org));
+                addDiscoveries(results, state, "pr", topic,
+                        ghJson(Actor.USER, prArgs.toArray(new String[0])));
+            }
+        }
+
+        return new ArrayList<>(results.values());
+    }
+
+    private void addDiscoveries(Map<String, WorkflowState.DiscoveryEntry> results,
+                                WorkflowState state, String type, String source, JsonNode searchResult) {
+        if (searchResult == null || !searchResult.isArray()) return;
+        for (JsonNode n : searchResult) {
+            String ownerRepo = n.path("repository").path("nameWithOwner").asText("");
+            int number = n.path("number").asInt();
+            String key = ownerRepo + "#" + number;
+
+            if (config.excludeOrgs.contains(ownerRepo.split("/")[0])) continue;
+            if (state.issues.containsKey(key)) continue;
+            if (state.reviews.containsKey(key)) continue;
+            if (results.containsKey(key)) continue;
+
+            WorkflowState.DiscoveryEntry entry = new WorkflowState.DiscoveryEntry();
+            entry.title = n.path("title").asText("");
+            entry.ownerRepo = ownerRepo;
+            entry.number = number;
+            entry.url = n.path("url").asText("");
+            entry.type = type;
+            entry.source = source;
+            entry.matchedTopic = "mention".equals(source) ? null : source;
+            results.put(key, entry);
+        }
     }
 
     // --- Issue details ---

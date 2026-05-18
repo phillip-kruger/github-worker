@@ -167,6 +167,19 @@ public class GitHubWorker implements Callable<Integer> {
             state.reviews.put(key, entry);
         }
 
+        // 2b. Topic-based discovery
+        if (!config.topics.isEmpty()) {
+            System.out.println("\nDiscovering items by topics: " + String.join(", ", config.topics) + "...");
+            var discoveries = gh.fetchDiscoveryItems(state);
+            state.discoveries.clear();
+            for (var d : discoveries) {
+                state.discoveries.put(d.ownerRepo + "#" + d.number, d);
+            }
+            System.out.println("Found " + discoveries.size() + " discoverable item(s).");
+        }
+
+        saveState(state);
+
         if (preview) {
             System.out.println("\nTracked issues:");
             for (var e : state.issues.entrySet()) {
@@ -175,6 +188,13 @@ public class GitHubWorker implements Callable<Integer> {
             System.out.println("Tracked reviews:");
             for (var e : state.reviews.entrySet()) {
                 System.out.println("  " + e.getKey() + " [" + e.getValue().state + "] — " + e.getValue().title);
+            }
+            if (!state.discoveries.isEmpty()) {
+                System.out.println("Discoveries:");
+                for (var e : state.discoveries.entrySet()) {
+                    var d = e.getValue();
+                    System.out.println("  " + e.getKey() + " [" + d.type + "] " + d.source + " — " + d.title);
+                }
             }
             return 0;
         }

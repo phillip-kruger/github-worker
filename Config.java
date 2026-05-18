@@ -27,6 +27,8 @@ public class Config {
     int lookbackDays;
     String agent;
     boolean emailNotifications;
+    Set<String> topics;
+    Set<String> orgs;
 
     static Config load() {
         if (!Files.exists(CONFIG_PATH)) {
@@ -65,6 +67,8 @@ public class Config {
         c.lookbackDays = Integer.parseInt(raw.getOrDefault("LOOKBACK_DAYS", "7"));
         c.agent = raw.getOrDefault("AGENT", "claude");
         c.emailNotifications = !"false".equalsIgnoreCase(raw.getOrDefault("EMAIL_NOTIFICATIONS", "true"));
+        c.topics = parseSet(raw.getOrDefault("TOPICS", ""));
+        c.orgs = parseSet(raw.getOrDefault("ORGS", ""));
         return c;
     }
 
