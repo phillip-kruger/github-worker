@@ -227,45 +227,39 @@ public class GitHubClient {
         String since = LocalDate.now().minusDays(config.lookbackDays).format(DateTimeFormatter.ISO_DATE);
         Map<String, WorkflowState.DiscoveryEntry> results = new LinkedHashMap<>();
 
-        // 1. Issues/PRs mentioning the user (scoped to orgs if configured)
-        for (String org : config.orgs.isEmpty() ? List.of("") : config.orgs) {
-            List<String> issueArgs = new ArrayList<>(List.of("search", "issues",
-                    "--mention", config.githubUser,
-                    "--created", ">=" + since, "--state", "open", "--limit", "20",
-                    "--json", "repository,number,title,url"));
-            if (!org.isEmpty()) issueArgs.addAll(List.of("--owner", org));
-            addDiscoveries(results, state, "issue", "mention",
-                    ghJson(Actor.USER, issueArgs.toArray(new String[0])));
-
-            List<String> prArgs = new ArrayList<>(List.of("search", "prs",
-                    "--mention", config.githubUser,
-                    "--created", ">=" + since, "--state", "open", "--limit", "20",
-                    "--json", "repository,number,title,url"));
-            if (!org.isEmpty()) prArgs.addAll(List.of("--owner", org));
-            addDiscoveries(results, state, "pr", "mention",
-                    ghJson(Actor.USER, prArgs.toArray(new String[0])));
+        // 1. Issues/PRs mentioning the user (scoped to orgs/repos if configured)
+        for (String scope : config.orgs.isEmpty() ? List.of("") : config.orgs) {
+            searchDiscovery(results, state, since, "mention", scope,
+                    "--mention", config.githubUser);
         }
 
-        // 2. Per-topic searches (scoped to orgs)
+        // 2. Per-topic searches (scoped to orgs/repos)
         for (String topic : config.topics) {
-            for (String org : config.orgs.isEmpty() ? List.of("") : config.orgs) {
-                List<String> issueArgs = new ArrayList<>(List.of("search", "issues",
-                        topic, "--created", ">=" + since, "--state", "open", "--limit", "10",
-                        "--json", "repository,number,title,url"));
-                if (!org.isEmpty()) issueArgs.addAll(List.of("--owner", org));
-                addDiscoveries(results, state, "issue", topic,
-                        ghJson(Actor.USER, issueArgs.toArray(new String[0])));
-
-                List<String> prArgs = new ArrayList<>(List.of("search", "prs",
-                        topic, "--created", ">=" + since, "--state", "open", "--limit", "10",
-                        "--json", "repository,number,title,url"));
-                if (!org.isEmpty()) prArgs.addAll(List.of("--owner", org));
-                addDiscoveries(results, state, "pr", topic,
-                        ghJson(Actor.USER, prArgs.toArray(new String[0])));
+            for (String scope : config.orgs.isEmpty() ? List.of("") : config.orgs) {
+                searchDiscovery(results, state, since, topic, scope, topic);
             }
         }
 
         return new ArrayList<>(results.values());
+    }
+
+    private void searchDiscovery(Map<String, WorkflowState.DiscoveryEntry> results,
+                                 WorkflowState state, String since, String source,
+                                 String scope, String... extraArgs) {
+        // scope can be: "" (global), "org" (whole org), or "org/repo" (specific repo)
+        String scopeFlag = scope.contains("/") ? "--repo" : "--owner";
+
+        for (String type : List.of("issues", "prs")) {
+            List<String> args = new ArrayList<>(List.of("search", type));
+            Collections.addAll(args, extraArgs);
+            args.addAll(List.of("--created", ">=" + since, "--state", "open",
+                    "--limit", "mention".equals(source) ? "20" : "10",
+                    "--json", "repository,number,title,url"));
+            if (!scope.isEmpty()) args.addAll(List.of(scopeFlag, scope));
+
+            addDiscoveries(results, state, type.equals("prs") ? "pr" : "issue", source,
+                    ghJson(Actor.USER, args.toArray(new String[0])));
+        }
     }
 
     private void addDiscoveries(Map<String, WorkflowState.DiscoveryEntry> results,
