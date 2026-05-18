@@ -656,6 +656,7 @@ public class GitHubClient {
         // Switch origin to HTTPS with embedded token so git push works
         git(Actor.BOT, mainDir, "remote", "set-url", "origin", httpsOrigin);
         git(Actor.BOT, mainDir, "remote", "add", "upstream", httpsUpstream);
+        disableGPGSigning(mainDir);
 
         String defaultBranch = getDefaultBranch(ownerRepo);
         git(Actor.BOT, mainDir, "fetch", "upstream", defaultBranch);
@@ -669,6 +670,10 @@ public class GitHubClient {
      * Set up Maven dependency isolation for a worktree by creating
      * .mvn/maven.config with a worktree-scoped local repo.
      */
+    private void disableGPGSigning(Path wtDir) {
+        git(Actor.BOT, wtDir, "config", "commit.gpgsign", "false");
+    }
+
     private void setupMavenIsolation(Path wtDir, String ownerRepo, int number) throws IOException {
         if (!java.nio.file.Files.exists(wtDir.resolve("pom.xml"))) return;
 
@@ -700,6 +705,7 @@ public class GitHubClient {
                 "-b", branch, "upstream/" + defaultBranch);
         if (result == null) return null;
 
+        disableGPGSigning(wtDir);
         setupMavenIsolation(wtDir, ownerRepo, issueNumber);
         return wtDir;
     }
@@ -727,6 +733,7 @@ public class GitHubClient {
             if (result == null) return null;
         }
 
+        disableGPGSigning(wtDir);
         setupMavenIsolation(wtDir, ownerRepo, issueNumber);
         return wtDir;
     }
@@ -754,6 +761,7 @@ public class GitHubClient {
                 "worktree", "add", wtDir.toAbsolutePath().toString(), "pr-" + prNumber);
         if (result == null) return null;
 
+        disableGPGSigning(wtDir);
         setupMavenIsolation(wtDir, ownerRepo, prNumber);
         return wtDir;
     }
