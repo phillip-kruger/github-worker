@@ -245,31 +245,27 @@ public class GitHubClient {
         if (!ownerFlags.isEmpty()) scopeBatches.add(ownerFlags);
         if (scopeBatches.isEmpty()) scopeBatches.add(List.of());
 
-        // 1. Mentions
+        // 1. Mentions (issues only — PRs not in our list are handled by others)
         for (List<String> scope : scopeBatches) {
-            for (String type : List.of("issues", "prs")) {
-                List<String> args = new ArrayList<>(List.of("search", type,
-                        "--mention", config.githubUser,
-                        "--created", ">=" + since, "--state", "open", "--limit", "30",
-                        "--json", "repository,number,title,url"));
-                args.addAll(scope);
-                addDiscoveries(results, state, type.equals("prs") ? "pr" : "issue", "mention",
-                        ghJson(Actor.USER, args.toArray(new String[0])));
-            }
+            List<String> args = new ArrayList<>(List.of("search", "issues",
+                    "--mention", config.githubUser,
+                    "--created", ">=" + since, "--state", "open", "--limit", "30",
+                    "--json", "repository,number,title,url"));
+            args.addAll(scope);
+            addDiscoveries(results, state, "issue", "mention",
+                    ghJson(Actor.USER, args.toArray(new String[0])));
         }
 
-        // 2. Topics
+        // 2. Topics (issues without linked PRs — if it has a PR, someone is on it)
         for (String topic : config.topics) {
             for (List<String> scope : scopeBatches) {
-                for (String type : List.of("issues", "prs")) {
-                    List<String> args = new ArrayList<>(List.of("search", type,
-                            topic,
-                            "--created", ">=" + since, "--state", "open", "--limit", "15",
-                            "--json", "repository,number,title,url"));
-                    args.addAll(scope);
-                    addDiscoveries(results, state, type.equals("prs") ? "pr" : "issue", topic,
-                            ghJson(Actor.USER, args.toArray(new String[0])));
-                }
+                List<String> args = new ArrayList<>(List.of("search", "issues",
+                        topic, "no:linkedpr",
+                        "--created", ">=" + since, "--state", "open", "--limit", "15",
+                        "--json", "repository,number,title,url"));
+                args.addAll(scope);
+                addDiscoveries(results, state, "issue", topic,
+                        ghJson(Actor.USER, args.toArray(new String[0])));
             }
         }
 
