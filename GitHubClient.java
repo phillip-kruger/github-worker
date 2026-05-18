@@ -227,39 +227,49 @@ public class GitHubClient {
         String since = LocalDate.now().minusDays(config.lookbackDays).format(DateTimeFormatter.ISO_DATE);
         Map<String, WorkflowState.DiscoveryEntry> results = new LinkedHashMap<>();
 
-        // Build repo flags once — gh search supports multiple --owner/--repo in one call
-        List<String> scopeFlags = new ArrayList<>();
+        // Split orgs into --repo flags and --owner flags (can't mix them in one call)
+        List<String> repoFlags = new ArrayList<>();
+        List<String> ownerFlags = new ArrayList<>();
         for (String scope : config.orgs) {
             if (scope.contains("/")) {
-                scopeFlags.add("--repo");
-                scopeFlags.add(scope);
+                repoFlags.add("--repo");
+                repoFlags.add(scope);
             } else {
-                scopeFlags.add("--owner");
-                scopeFlags.add(scope);
+                ownerFlags.add("--owner");
+                ownerFlags.add(scope);
+            }
+        }
+        // Build list of scope batches to search (one per flag type that has entries)
+        List<List<String>> scopeBatches = new ArrayList<>();
+        if (!repoFlags.isEmpty()) scopeBatches.add(repoFlags);
+        if (!ownerFlags.isEmpty()) scopeBatches.add(ownerFlags);
+        if (scopeBatches.isEmpty()) scopeBatches.add(List.of());
+
+        // 1. Mentions
+        for (List<String> scope : scopeBatches) {
+            for (String type : List.of("issues", "prs")) {
+                List<String> args = new ArrayList<>(List.of("search", type,
+                        "--mention", config.githubUser,
+                        "--created", ">=" + since, "--state", "open", "--limit", "30",
+                        "--json", "repository,number,title,url"));
+                args.addAll(scope);
+                addDiscoveries(results, state, type.equals("prs") ? "pr" : "issue", "mention",
+                        ghJson(Actor.USER, args.toArray(new String[0])));
             }
         }
 
-        // 1. Mentions — one call for issues, one for PRs
-        for (String type : List.of("issues", "prs")) {
-            List<String> args = new ArrayList<>(List.of("search", type,
-                    "--mention", config.githubUser,
-                    "--created", ">=" + since, "--state", "open", "--limit", "30",
-                    "--json", "repository,number,title,url"));
-            args.addAll(scopeFlags);
-            addDiscoveries(results, state, type.equals("prs") ? "pr" : "issue", "mention",
-                    ghJson(Actor.USER, args.toArray(new String[0])));
-        }
-
-        // 2. Topics — one call per topic (issues + PRs combined via two calls)
+        // 2. Topics
         for (String topic : config.topics) {
-            for (String type : List.of("issues", "prs")) {
-                List<String> args = new ArrayList<>(List.of("search", type,
-                        topic,
-                        "--created", ">=" + since, "--state", "open", "--limit", "15",
-                        "--json", "repository,number,title,url"));
-                args.addAll(scopeFlags);
-                addDiscoveries(results, state, type.equals("prs") ? "pr" : "issue", topic,
-                        ghJson(Actor.USER, args.toArray(new String[0])));
+            for (List<String> scope : scopeBatches) {
+                for (String type : List.of("issues", "prs")) {
+                    List<String> args = new ArrayList<>(List.of("search", type,
+                            topic,
+                            "--created", ">=" + since, "--state", "open", "--limit", "15",
+                            "--json", "repository,number,title,url"));
+                    args.addAll(scope);
+                    addDiscoveries(results, state, type.equals("prs") ? "pr" : "issue", topic,
+                            ghJson(Actor.USER, args.toArray(new String[0])));
+                }
             }
         }
 
