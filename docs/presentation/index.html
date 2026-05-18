@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>House Elves — GitHub Worker</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --r-background-color: #0e1117;
+  --r-main-font: 'Outfit', sans-serif;
+  --r-heading-font: 'Outfit', sans-serif;
+  --r-code-font: 'IBM Plex Mono', monospace;
+  --r-main-color: #c9d1d9;
+  --r-heading-color: #ecf0f6;
+  --r-link-color: #4c8dff;
+  --r-link-color-hover: #6ba1ff;
+  --r-selection-background-color: rgba(76,141,255,0.3);
+  --accent: #4c8dff;
+  --green: #3fb950;
+  --amber: #d29922;
+  --red: #f85149;
+  --purple: #a371f7;
+  --cyan: #39d2c0;
+}
+
+.reveal { font-size: 32px; }
+.reveal h1 { font-size: 2.2em; font-weight: 700; }
+.reveal h2 { font-size: 1.6em; font-weight: 600; color: var(--accent); }
+.reveal h3 { font-size: 1.2em; font-weight: 500; color: var(--amber); }
+
+.reveal .sock { font-size: 3em; display: block; margin-bottom: 0.3em; }
+.reveal .subtitle { font-size: 0.6em; color: #8b949e; font-family: var(--r-code-font); }
+
+.reveal .badge {
+  display: inline-block;
+  font-family: var(--r-code-font);
+  font-size: 0.55em;
+  padding: 0.15em 0.5em;
+  border-radius: 4px;
+  margin: 0.1em;
+  font-weight: 500;
+}
+
+.badge-green { background: rgba(63,185,80,0.15); color: var(--green); }
+.badge-amber { background: rgba(210,153,34,0.15); color: var(--amber); }
+.badge-blue  { background: rgba(76,141,255,0.15); color: var(--accent); }
+.badge-purple { background: rgba(163,113,247,0.15); color: var(--purple); }
+.badge-red   { background: rgba(248,81,73,0.12); color: var(--red); }
+.badge-cyan  { background: rgba(57,210,192,0.12); color: var(--cyan); }
+
+.reveal .flow-diagram {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2em;
+  margin: 0.8em 0;
+  font-family: var(--r-code-font);
+  font-size: 0.5em;
+}
+
+.flow-diagram .step {
+  padding: 0.3em 0.6em;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.06);
+  color: #8b949e;
+}
+
+.flow-diagram .step.active {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.flow-diagram .arrow { color: #3d4654; margin: 0 0.1em; }
+
+.reveal .two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5em;
+  text-align: left;
+}
+
+.reveal .two-col h3 { margin-top: 0; }
+
+.reveal pre { font-size: 0.5em; width: 100%; }
+.reveal pre code { padding: 1em; border-radius: 8px; }
+
+.reveal ul { text-align: left; }
+.reveal li { margin-bottom: 0.4em; font-size: 0.85em; }
+
+.reveal .dim { color: #8b949e; }
+.reveal .highlight { color: var(--accent); }
+.reveal .green { color: var(--green); }
+.reveal .amber { color: var(--amber); }
+.reveal .red { color: var(--red); }
+
+.reveal .emoji-list { list-style: none; padding: 0; }
+.reveal .emoji-list li { padding-left: 0; }
+.reveal .emoji-list li::before { content: none; }
+
+.reveal table { font-size: 0.65em; margin: 0 auto; }
+.reveal table th { color: var(--accent); border-bottom: 2px solid #2a313c; }
+.reveal table td { border-bottom: 1px solid #1c2129; }
+
+.reveal .fragment.current-visible.visible:not(.current-fragment) { display: none; }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- Title -->
+<section>
+  <span class="sock">🧦</span>
+  <h1>House Elves</h1>
+  <p class="subtitle">github-worker</p>
+  <p style="font-size:0.6em; color:#8b949e; margin-top:1em;">
+    An AI-powered GitHub automation tool for the Quarkus team
+  </p>
+</section>
+
+<!-- The Problem -->
+<section>
+  <h2>The Problem</h2>
+  <ul class="emoji-list">
+    <li>📬 Too many issues assigned, not enough hours</li>
+    <li>🔄 Review requests pile up across repos</li>
+    <li>🤖 Repetitive work: clone, fix, test, PR, review, CI, repeat</li>
+    <li>⏰ Context switching between issues kills productivity</li>
+  </ul>
+</section>
+
+<!-- The Solution -->
+<section>
+  <h2>The Solution</h2>
+  <p style="font-size:1.1em;">A <span class="highlight">House Elf</span> that works while you sleep</p>
+  <ul class="emoji-list" style="margin-top:0.8em;">
+    <li>🧠 Uses <strong>Claude Code CLI</strong> with full MCP server access</li>
+    <li>🤝 Two GitHub accounts — <strong>you</strong> + <strong>bot</strong></li>
+    <li>📋 Multi-step stateful workflow — one step per scheduled run</li>
+    <li>👀 You stay in control — approve, review, redirect</li>
+  </ul>
+</section>
+
+<!-- Architecture Overview -->
+<section>
+  <h2>Architecture</h2>
+  <div class="two-col">
+    <div>
+      <h3>Worker</h3>
+      <ul>
+        <li>Java / JBang</li>
+        <li>Runs every 5 minutes (configurable)</li>
+        <li>Shells out to <code>gh</code> and <code>claude</code></li>
+        <li>State persisted in JSON</li>
+        <li>Git worktrees for isolation</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Dashboard</h3>
+      <ul>
+        <li>Quarkus web app</li>
+        <li>Live updates via WebSocket</li>
+        <li>Trigger runs, view logs</li>
+        <li>Config editor</li>
+        <li>Topic-based discovery</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Two Accounts -->
+<section>
+  <h2>Two Accounts</h2>
+  <table>
+    <thead><tr><th>Your Account</th><th>Bot Account</th></tr></thead>
+    <tbody>
+      <tr><td>Reads assigned issues</td><td>Posts understanding comments</td></tr>
+      <tr><td>Checks reactions & reviews</td><td>Clones, codes, pushes</td></tr>
+      <tr><td>Monitors CI status</td><td>Creates draft PRs</td></tr>
+      <tr><td>—</td><td>Posts reviews</td></tr>
+      <tr><td>—</td><td>Addresses feedback</td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:0.6em; color:#8b949e; margin-top:0.5em;">
+    Clear separation — you always know what's automated
+  </p>
+</section>
+
+<!-- Issue Workflow Title -->
+<section>
+  <h2>Issue Workflow</h2>
+  <p>How an issue goes from assigned to merged</p>
+</section>
+
+<!-- Step 1: Signal -->
+<section>
+  <h3>Step 1 — Signal Intent</h3>
+  <table>
+    <thead><tr><th>Signal</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Self-assign an issue</td><td>Worker picks it up</td></tr>
+      <tr><td>👀 on issue assigned by others</td><td>Confirms you want help</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Step 2: Understand -->
+<section>
+  <h3>Step 2 — Bot Analyzes</h3>
+  <div class="flow-diagram">
+    <span class="step active">NEW</span>
+    <span class="arrow">→</span>
+    <span class="step">APPROVAL</span>
+    <span class="arrow">→</span>
+    <span class="step">CODING</span>
+    <span class="arrow">→</span>
+    <span class="step">...</span>
+  </div>
+  <ul>
+    <li>Security triage — flags malicious issues</li>
+    <li>Bot posts a comment summarizing its understanding</li>
+    <li>Proposes a solution approach</li>
+    <li>Mentions you: <em>"@you React with 👍 to proceed"</em></li>
+  </ul>
+</section>
+
+<!-- Step 3: Approve -->
+<section>
+  <h3>Step 3 — You Approve</h3>
+  <div class="flow-diagram">
+    <span class="step">NEW</span>
+    <span class="arrow">→</span>
+    <span class="step active">APPROVAL</span>
+    <span class="arrow">→</span>
+    <span class="step">CODING</span>
+    <span class="arrow">→</span>
+    <span class="step">...</span>
+  </div>
+  <ul>
+    <li>👍 — proceed to coding</li>
+    <li>👎 — bot re-analyzes with your feedback comment</li>
+    <li>Up to 3 attempts, then gives up gracefully</li>
+  </ul>
+</section>
+
+<!-- Step 4: Code -->
+<section>
+  <h3>Step 4 — Bot Codes</h3>
+  <div class="flow-diagram">
+    <span class="step">NEW</span>
+    <span class="arrow">→</span>
+    <span class="step">APPROVAL</span>
+    <span class="arrow">→</span>
+    <span class="step active">CODING</span>
+    <span class="arrow">→</span>
+    <span class="step">REVIEW</span>
+    <span class="arrow">→</span>
+    <span class="step">...</span>
+  </div>
+  <ul>
+    <li>Creates a git worktree (fast, isolated)</li>
+    <li>Claude Code with <strong>full MCP access</strong>:
+      <ul>
+        <li>Quarkus Agent — build, test, extensions</li>
+        <li>All configured skills</li>
+      </ul>
+    </li>
+    <li>Pushes to bot's fork, creates draft PR</li>
+  </ul>
+</section>
+
+<!-- Step 5: Self-Review -->
+<section>
+  <h3>Step 5 — Bot Reviews Itself</h3>
+  <div class="flow-diagram">
+    <span class="step">CODING</span>
+    <span class="arrow">→</span>
+    <span class="step active">SELF_REVIEW</span>
+    <span class="arrow">→</span>
+    <span class="step">FIX_REVIEW</span>
+    <span class="arrow">→</span>
+    <span class="step">READY</span>
+  </div>
+  <ul>
+    <li>Correctness, tests, documentation</li>
+    <li>Security, maintainability</li>
+    <li>Quarkus patterns and conventions</li>
+    <li>If issues found → fixes them → squashes → marks ready</li>
+  </ul>
+</section>
+
+<!-- Step 6: Your Review -->
+<section>
+  <h3>Step 6 — Your Review</h3>
+  <div class="flow-diagram">
+    <span class="step">FIX_REVIEW</span>
+    <span class="arrow">→</span>
+    <span class="step active">READY</span>
+    <span class="arrow">→</span>
+    <span class="step">SQUASH</span>
+    <span class="arrow">→</span>
+    <span class="step">CI</span>
+  </div>
+  <ul>
+    <li>Bot adds you as reviewer, marks PR ready</li>
+    <li><strong>You comment</strong> → bot addresses feedback automatically</li>
+    <li><strong>Request changes</strong> → bot fixes and re-requests review</li>
+    <li><strong>You approve</strong> → bot squashes to one commit</li>
+  </ul>
+</section>
+
+<!-- Step 7: CI -->
+<section>
+  <h3>Step 7 — CI Monitoring</h3>
+  <div class="flow-diagram">
+    <span class="step">SQUASH</span>
+    <span class="arrow">→</span>
+    <span class="step active">CI_WATCH</span>
+    <span class="arrow">→</span>
+    <span class="step">DONE</span>
+  </div>
+  <ul>
+    <li>Bot monitors CI checks every 5 minutes</li>
+    <li>If CI fails → bot fixes and re-pushes</li>
+    <li>Up to 3 fix attempts</li>
+    <li>CI green → <span class="green">DONE</span></li>
+  </ul>
+</section>
+
+<!-- Full Flow Diagram -->
+<section>
+  <h2>Full Issue Flow</h2>
+  <div class="flow-diagram" style="font-size:0.45em;">
+    <span class="step badge-cyan">NEW</span><span class="arrow">→</span>
+    <span class="step badge-amber">APPROVAL</span><span class="arrow">→</span>
+    <span class="step badge-purple">CODING</span><span class="arrow">→</span>
+    <span class="step badge-blue">SELF_REVIEW</span><span class="arrow">→</span>
+    <span class="step badge-amber">FIX_REVIEW</span><span class="arrow">→</span>
+    <span class="step badge-green">READY</span><span class="arrow">→</span>
+    <span class="step badge-amber">FEEDBACK</span><span class="arrow">→</span>
+    <span class="step badge-purple">SQUASH</span><span class="arrow">→</span>
+    <span class="step badge-blue">CI_WATCH</span><span class="arrow">→</span>
+    <span class="step badge-red">CI_FIX</span><span class="arrow">→</span>
+    <span class="step badge-green">DONE</span>
+  </div>
+  <p style="font-size:0.6em; color:#8b949e;">
+    Each arrow = one scheduled run (5 min). You only interact at APPROVAL and READY.
+  </p>
+</section>
+
+<!-- Review Workflow -->
+<section>
+  <h2>Review Workflow</h2>
+  <p>When you're requested as a reviewer on a PR</p>
+  <div class="flow-diagram" style="margin-top:1em;">
+    <span class="step badge-cyan">NEW</span>
+    <span class="arrow">→</span>
+    <span class="step badge-blue">REVIEW_POSTED</span>
+    <span class="arrow">→</span>
+    <span class="step badge-green">DONE</span>
+  </div>
+  <ul style="margin-top:0.8em;">
+    <li>Signal: self-request as reviewer OR 👀 on the PR</li>
+    <li>Bot does a full review:
+      <span class="badge badge-red">[CRITICAL]</span>
+      <span class="badge badge-amber">[SUGGESTION]</span>
+      <span class="badge badge-blue">[NIT]</span>
+    </li>
+    <li>Posts the review as the bot account</li>
+  </ul>
+</section>
+
+<!-- Discovery -->
+<section>
+  <h2>Discovery</h2>
+  <p>Find issues and PRs you should look at</p>
+  <ul style="margin-top:0.8em;">
+    <li>Configure topics: <code>GraphQL, Dev UI, OpenAPI, ...</code></li>
+    <li>Scoped to your orgs: <code>quarkusio, quarkiverse</code></li>
+    <li>Shows items that mention you or match your topics</li>
+    <li>Quick actions: 👀 react or self-assign from the dashboard</li>
+    <li>Items flow into the issue/review pipeline automatically</li>
+  </ul>
+</section>
+
+<!-- Dashboard -->
+<section>
+  <h2>Dashboard</h2>
+  <p><code>http://github-worker.house-elves:7478</code></p>
+  <ul style="margin-top:0.8em;">
+    <li>🔍 Discovery panel — collapsible, with quick actions</li>
+    <li>⚡ Issues — state badges, flow diagram, retry/remove</li>
+    <li>📋 Reviews — tracking and status</li>
+    <li>🖥 Logs — Worker + Claude tabs</li>
+    <li>⚙️ Config — edit everything, toggle notifications</li>
+    <li>🌙/☀️ Dark/light theme</li>
+    <li>Live updates via WebSocket</li>
+  </ul>
+</section>
+
+<!-- Safety -->
+<section>
+  <h2>Safety</h2>
+  <ul class="emoji-list">
+    <li>🔒 <strong>Security triage</strong> — every issue scanned for malicious content before code runs</li>
+    <li>🤖 <strong>Bot account</strong> — all actions clearly from the bot, never your account</li>
+    <li>📝 <strong>Draft PRs</strong> — you always review before anything goes live</li>
+    <li>🔁 <strong>Max 3 retries</strong> — bot gives up gracefully, doesn't spam</li>
+    <li>🔐 <strong>Lock file</strong> — prevents overlapping runs</li>
+    <li>⏰ <strong>Active hours</strong> — only runs during your work hours</li>
+  </ul>
+</section>
+
+<!-- Tech Stack -->
+<section>
+  <h2>Tech Stack</h2>
+  <div class="two-col">
+    <div>
+      <h3>Worker</h3>
+      <ul>
+        <li>Java 17+ / JBang</li>
+        <li><code>gh</code> CLI for GitHub API</li>
+        <li><code>claude -p</code> for AI coding</li>
+        <li>Git worktrees + Maven isolation</li>
+        <li>Picocli, Jackson</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Dashboard</h3>
+      <ul>
+        <li>Quarkus (REST + WebSocket + Scheduler)</li>
+        <li>Single-page HTML/CSS/JS</li>
+        <li>No frontend framework</li>
+        <li>Port 7478</li>
+      </ul>
+    </div>
+  </div>
+  <p style="font-size:0.55em; color:#8b949e; margin-top:0.8em;">
+    Pluggable AI agent — Claude Code is default, but the CodingAgent interface supports others
+  </p>
+</section>
+
+<!-- Install -->
+<section>
+  <h2>Install</h2>
+  <pre><code class="language-bash" data-trim>
+# Install the worker
+jbang app install github-worker@House-elves/github-worker
+
+# Interactive setup
+github-worker --install
+
+# Install the dashboard
+jbang app install github-worker-ui@House-elves/github-worker
+github-worker-ui --install
+  </code></pre>
+  <p style="font-size:0.6em; color:#8b949e;">
+    Works on Linux (systemd) and macOS (launchd). Survives restarts.
+  </p>
+</section>
+
+<!-- Configuration -->
+<section>
+  <h2>Configuration</h2>
+  <pre><code class="language-bash" data-trim>
+# ~/.config/github-worker/config
+GITHUB_USER=your-username
+GITHUB_TOKEN=ghp_...
+BOT_USER=your-username-bot
+BOT_TOKEN=ghp_...
+SCHEDULE=*/5 * * * *
+TOPICS=GraphQL,Dev UI,OpenAPI
+ORGS=quarkusio,quarkiverse
+ACTIVE_HOURS=07-22
+EMAIL_NOTIFICATIONS=true
+  </code></pre>
+  <p style="font-size:0.6em; color:#8b949e;">
+    All editable from the dashboard UI
+  </p>
+</section>
+
+<!-- CLI -->
+<section>
+  <h2>CLI Commands</h2>
+  <pre><code class="language-bash" data-trim>
+# See what the worker would pick up
+github-worker --preview
+
+# Check tracked items
+github-worker --status
+
+# Process one item
+github-worker --once
+
+# Dry run (no writes)
+github-worker --dry-run
+  </code></pre>
+</section>
+
+<!-- Extending -->
+<section>
+  <h2>Adding a New Agent</h2>
+  <pre><code class="language-java" data-trim>
+public class MyAgent implements CodingAgent {
+    public String run(String prompt, Path workDir,
+                      int timeoutMinutes) {
+        // Shell out to your AI CLI tool
+    }
+
+    public String runBare(String prompt,
+                          int timeoutSeconds) {
+        // Analysis-only mode, no filesystem
+    }
+}
+  </code></pre>
+  <p style="font-size:0.6em; color:#8b949e;">
+    Set <code>AGENT=my-agent</code> in config
+  </p>
+</section>
+
+<!-- Signals Cheat Sheet -->
+<section>
+  <h2>Signals Cheat Sheet</h2>
+  <table>
+    <thead><tr><th>Signal</th><th>What happens</th></tr></thead>
+    <tbody>
+      <tr><td>Self-assign issue</td><td>Bot starts working on it</td></tr>
+      <tr><td>👀 on assigned issue</td><td>Bot starts working on it</td></tr>
+      <tr><td>👍 on bot's comment</td><td>Bot proceeds to code</td></tr>
+      <tr><td>👎 on bot's comment</td><td>Bot re-analyzes with your feedback</td></tr>
+      <tr><td>Comment on draft PR</td><td>Bot addresses feedback</td></tr>
+      <tr><td>Request changes</td><td>Bot fixes and re-requests review</td></tr>
+      <tr><td>Approve PR</td><td>Bot squashes to one commit</td></tr>
+      <tr><td>👀 on PR (as reviewer)</td><td>Bot does a full review</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Demo -->
+<section>
+  <span class="sock">🧦</span>
+  <h2>Live Demo</h2>
+  <p style="color:#8b949e;">
+    <code>http://github-worker.house-elves:7478</code>
+  </p>
+</section>
+
+<!-- End -->
+<section>
+  <span class="sock">🧦</span>
+  <h1>Questions?</h1>
+  <p style="font-size:0.7em; margin-top:1em;">
+    <a href="https://github.com/House-elves/github-worker">github.com/House-elves/github-worker</a>
+  </p>
+  <p style="font-size:0.7em;">
+    <a href="https://github.com/House-elves/github-worker-ui">github.com/House-elves/github-worker-ui</a>
+  </p>
+</section>
+
+</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+<script>
+Reveal.initialize({
+  hash: true,
+  transition: 'slide',
+  plugins: [RevealHighlight]
+});
+</script>
+</body>
+</html>
