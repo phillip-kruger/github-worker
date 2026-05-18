@@ -260,7 +260,7 @@ public class GitHubClient {
         for (String topic : config.topics) {
             for (List<String> scope : scopeBatches) {
                 List<String> args = new ArrayList<>(List.of("search", "issues",
-                        topic, "no:linkedpr",
+                        topic + " -linked:pr",
                         "--created", ">=" + since, "--state", "open", "--limit", "15",
                         "--json", "repository,number,title,url"));
                 args.addAll(scope);
