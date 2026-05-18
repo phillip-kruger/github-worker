@@ -40,12 +40,19 @@ public class GitHubWorker implements Callable<Integer> {
     @Option(names = "--status", description = "Show current state of tracked issues and reviews")
     boolean status;
 
+    @Option(names = "--discover", description = "Run topic-based discovery and update state")
+    boolean discover;
+
     @Override
     public Integer call() {
         Config config = Config.load();
 
         if (status) {
             return showStatus(config);
+        }
+
+        if (discover) {
+            return runDiscovery(config);
         }
 
         config.validate(!preview && !dryRun);
@@ -167,19 +174,6 @@ public class GitHubWorker implements Callable<Integer> {
             state.reviews.put(key, entry);
         }
 
-        // 2b. Topic-based discovery
-        if (!config.topics.isEmpty()) {
-            System.out.println("\nDiscovering items by topics: " + String.join(", ", config.topics) + "...");
-            var discoveries = gh.fetchDiscoveryItems(state);
-            state.discoveries.clear();
-            for (var d : discoveries) {
-                state.discoveries.put(d.ownerRepo + "#" + d.number, d);
-            }
-            System.out.println("Found " + discoveries.size() + " discoverable item(s).");
-        }
-
-        saveState(state);
-
         if (preview) {
             System.out.println("\nTracked issues:");
             for (var e : state.issues.entrySet()) {
@@ -188,13 +182,6 @@ public class GitHubWorker implements Callable<Integer> {
             System.out.println("Tracked reviews:");
             for (var e : state.reviews.entrySet()) {
                 System.out.println("  " + e.getKey() + " [" + e.getValue().state + "] — " + e.getValue().title);
-            }
-            if (!state.discoveries.isEmpty()) {
-                System.out.println("Discoveries:");
-                for (var e : state.discoveries.entrySet()) {
-                    var d = e.getValue();
-                    System.out.println("  " + e.getKey() + " [" + d.type + "] " + d.source + " — " + d.title);
-                }
             }
             return 0;
         }
@@ -266,6 +253,33 @@ public class GitHubWorker implements Callable<Integer> {
         }
 
         System.out.println("Done!");
+        return 0;
+    }
+
+    private int runDiscovery(Config config) {
+        config.validate(false);
+        GitHubClient gh = new GitHubClient(config);
+        WorkflowState state = WorkflowState.load(Config.STATE_PATH);
+
+        if (config.topics.isEmpty()) {
+            System.out.println("No TOPICS configured.");
+            return 0;
+        }
+
+        System.out.println("Discovering items by topics: " + String.join(", ", config.topics) + "...");
+        var discoveries = gh.fetchDiscoveryItems(state);
+        state.discoveries.clear();
+        for (var d : discoveries) {
+            state.discoveries.put(d.ownerRepo + "#" + d.number, d);
+        }
+        System.out.println("Found " + discoveries.size() + " discoverable item(s).");
+
+        try {
+            state.save(Config.STATE_PATH);
+        } catch (java.io.IOException e) {
+            System.err.println("Failed to save state: " + e.getMessage());
+            return 1;
+        }
         return 0;
     }
 
