@@ -380,13 +380,27 @@
 <!-- Discovery -->
 <section>
   <h2>Discovery</h2>
-  <p>Find issues and PRs you should look at</p>
+  <p>Find issues you should look at — on demand</p>
   <ul style="margin-top:0.8em;">
     <li>Configure topics: <code>GraphQL, Dev UI, OpenAPI, ...</code></li>
-    <li>Scoped to your orgs: <code>quarkusio, quarkiverse</code></li>
-    <li>Shows items that mention you or match your topics</li>
-    <li>Quick actions: 👀 react or self-assign from the dashboard</li>
+    <li>Scoped to orgs or repos: <code>quarkusio/quarkus, quarkiverse</code></li>
+    <li>Filters out issues that already have linked PRs</li>
+    <li>Loaded on demand — expand the panel in the dashboard</li>
+    <li>Quick actions: 👀 react or self-assign</li>
     <li>Items flow into the issue/review pipeline automatically</li>
+  </ul>
+</section>
+
+<!-- Manual Tracking -->
+<section>
+  <h2>Manual Tracking</h2>
+  <p>Add any issue or PR directly — bypass all filters</p>
+  <ul style="margin-top:0.8em;">
+    <li>Click <strong>+</strong> in the dashboard header</li>
+    <li>Paste a GitHub URL or <code>owner/repo#123</code></li>
+    <li>Auto-detects issue vs PR, fetches the title</li>
+    <li>No lookback limit, no eligibility checks</li>
+    <li>Goes straight into the workflow as NEW</li>
   </ul>
 </section>
 
@@ -395,7 +409,8 @@
   <h2>Dashboard</h2>
   <p><code>http://github-worker.house-elves:7478</code></p>
   <ul style="margin-top:0.8em;">
-    <li>🔍 Discovery panel — collapsible, with quick actions</li>
+    <li>🔍 Discovery — on-demand topic search with 👀 / assign</li>
+    <li>➕ Manual add — paste any issue or PR URL</li>
     <li>⚡ Issues — state badges, flow diagram, retry/remove</li>
     <li>📋 Reviews — tracking and status</li>
     <li>🖥 Logs — Worker + Claude tabs</li>
@@ -477,9 +492,10 @@ BOT_USER=your-username-bot
 BOT_TOKEN=ghp_...
 SCHEDULE=*/5 * * * *
 TOPICS=GraphQL,Dev UI,OpenAPI
-ORGS=quarkusio,quarkiverse
+ORGS=quarkusio/quarkus,quarkiverse
 ACTIVE_HOURS=07-22
 EMAIL_NOTIFICATIONS=true
+AGENT=claude
   </code></pre>
   <p style="font-size:0.6em; color:#8b949e;">
     All editable from the dashboard UI
@@ -539,6 +555,7 @@ public class MyAgent implements CodingAgent {
       <tr><td>Request changes</td><td>Bot fixes and re-requests review</td></tr>
       <tr><td>Approve PR</td><td>Bot squashes to one commit</td></tr>
       <tr><td>👀 on PR (as reviewer)</td><td>Bot does a full review</td></tr>
+      <tr><td>+ button in dashboard</td><td>Manually track any issue or PR</td></tr>
     </tbody>
   </table>
 </section>

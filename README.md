@@ -65,11 +65,15 @@ The dashboard is a Quarkus web app that monitors and controls the worker. After 
 
 Features:
 
-- Live state view of tracked issues and reviews
-- State machine flow visualization
-- Systemd log viewer
-- Trigger and preview buttons
-- Config editor
+- Live state view of tracked issues and reviews (auto-updates via WebSocket)
+- State machine flow visualization (click a row to see the current step)
+- On-demand topic-based discovery with 👀 and assign actions
+- Manual item tracking via + button (paste a URL or `owner/repo#123`)
+- Retry and remove buttons per tracked item
+- Worker and Claude log tabs
+- Config editor with toggle switches for boolean values
+- Dark/light theme toggle
+- Trigger Now button
 
 ## Configuration
 
@@ -90,6 +94,11 @@ Stored in `~/.config/github-worker/config`:
 | `LOOKBACK_DAYS` | How far back to search for issues | `7` |
 | `SCHEDULE` | Cron expression (e.g. `*/5 * * * *`) | `0 * * * *` |
 | `AGENT` | Coding agent to use (see below) | `claude` |
+| `EMAIL_NOTIFICATIONS` | Send email summaries (`true`/`false`) | `true` |
+| `TOPICS` | Comma-separated topics for discovery | — |
+| `ORGS` | Comma-separated orgs or repos for discovery scope | — |
+
+`ORGS` supports both `quarkiverse` (whole org) and `quarkusio/quarkus` (specific repo).
 
 Config can also be edited from the dashboard UI.
 
@@ -110,6 +119,9 @@ github-worker --once
 
 # Full logic but skip all write operations
 github-worker --dry-run
+
+# Run topic-based discovery (used by the dashboard)
+github-worker --discover
 ```
 
 Or use the dashboard at `http://github-worker.house-elves:7478` to trigger runs and monitor progress.
