@@ -281,8 +281,11 @@ public class GitHubClient {
             if (state.reviews.containsKey(key)) continue;
             if (results.containsKey(key)) continue;
 
+            String title = n.path("title").asText("");
+            if (title.startsWith("Bump quarkus") || title.startsWith("Bump io.quarkus")) continue;
+
             WorkflowState.DiscoveryEntry entry = new WorkflowState.DiscoveryEntry();
-            entry.title = n.path("title").asText("");
+            entry.title = title;
             entry.ownerRepo = ownerRepo;
             entry.number = number;
             entry.url = n.path("url").asText("");
