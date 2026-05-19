@@ -447,24 +447,79 @@ public class IssueWorkflow {
                 return WorkflowState.IssueState.FIXING_REVIEW;
             }
 
-            // Verify that changes were actually made
-            String diffCheck = gh.git(GitHubClient.Actor.BOT, repoDir,
-                    "diff", "HEAD~1", "--stat");
-            if (diffCheck == null || diffCheck.isEmpty()) {
-                System.out.println("  No changes detected after fix attempt — Claude may not have applied the fix. Retrying.");
+            // Verify the review findings were actually fixed
+            System.out.println("  Verifying review fixes...");
+            String reviewDiff = gh.git(GitHubClient.Actor.BOT, repoDir,
+                    "diff", "upstream/" + defaultBranch + "...HEAD");
+            if (reviewDiff == null) reviewDiff = "";
+            if (reviewDiff.length() > 15000) reviewDiff = reviewDiff.substring(0, 15000) + "\n... (truncated)";
+
+            String reviewFeedback = entry.feedbackText != null ? entry.feedbackText : "";
+            String verifyPrompt = """
+                    You are verifying that self-review findings were properly fixed.
+
+                    The review found these issues:
+                    %s
+
+                    The current code changes (diff):
+                    %s
+
+                    For EACH issue in the review, check if it was actually fixed in the code.
+                    Do NOT accept acknowledgements — look for concrete code changes.
+
+                    Respond with a JSON object:
+                    {
+                      "all_fixed": true/false,
+                      "unfixed": ["description of each unfixed issue"]
+                    }
+
+                    Output ONLY the JSON.
+                    """.formatted(reviewFeedback, reviewDiff);
+
+            String verifyResult = claude.run(verifyPrompt, repoDir, 5);
+            boolean allFixed = true;
+            String unfixedPoints = "";
+
+            if (verifyResult != null) {
+                try {
+                    int jsonStart = verifyResult.indexOf('{');
+                    int jsonEnd = verifyResult.lastIndexOf('}') + 1;
+                    if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                        var verifyMapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                        var verifyJson = verifyMapper.readTree(verifyResult.substring(jsonStart, jsonEnd));
+                        allFixed = verifyJson.path("all_fixed").asBoolean(false);
+                        var unfixedArr = verifyJson.path("unfixed");
+                        if (unfixedArr.isArray() && unfixedArr.size() > 0) {
+                            StringBuilder sb = new StringBuilder();
+                            for (var item : unfixedArr) {
+                                sb.append("- ").append(item.asText()).append("\n");
+                            }
+                            unfixedPoints = sb.toString();
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println("  Failed to parse verification: " + e.getMessage());
+                }
+            }
+
+            if (!allFixed) {
                 entry.attempts++;
+                System.out.println("  Verification FAILED (attempt " + entry.attempts + "/3). Unfixed:\n" + unfixedPoints);
                 if (entry.attempts >= 3) {
                     System.out.println("  Max fix attempts reached. Moving to ready for manual review.");
                     gh.postComment(ownerRepo, entry.prNumber,
                             "I attempted to fix the self-review findings " + entry.attempts
-                                    + " times but couldn't apply the changes. @" + config.githubUser
-                                    + " please review and fix manually.");
+                                    + " times but the verifier still finds unfixed issues:\n\n"
+                                    + unfixedPoints + "\n@" + config.githubUser
+                                    + " please fix manually.");
                     gh.addReviewer(ownerRepo, entry.prNumber, config.githubUser);
                     gh.markPRReady(ownerRepo, entry.prNumber);
                     entry.feedbackText = null;
                     entry.lastUpdated = Instant.now();
                     return WorkflowState.IssueState.READY_FOR_REVIEW;
                 }
+                entry.feedbackText = reviewFeedback + "\n\nPREVIOUS FIX ATTEMPT FAILED. These issues are still NOT fixed:\n"
+                        + unfixedPoints + "\nYou MUST make the actual code changes.";
                 return WorkflowState.IssueState.FIXING_REVIEW;
             }
 
@@ -637,34 +692,82 @@ public class IssueWorkflow {
                 return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
             }
 
-            // Verify changes were actually made
-            String diffCheck = gh.git(GitHubClient.Actor.BOT, repoDir, "diff", "--stat");
-            String statusCheck = gh.git(GitHubClient.Actor.BOT, repoDir, "status", "--porcelain");
-            boolean hasChanges = (diffCheck != null && !diffCheck.isEmpty())
-                    || (statusCheck != null && !statusCheck.isEmpty());
+            // Verify the feedback was actually addressed by running a verification pass
+            System.out.println("  Verifying feedback was addressed...");
+            String newDiff = gh.git(GitHubClient.Actor.BOT, repoDir,
+                    "diff", "upstream/" + defaultBranch + "...HEAD");
+            if (newDiff == null) newDiff = "";
+            if (newDiff.length() > 15000) newDiff = newDiff.substring(0, 15000) + "\n... (truncated)";
 
-            if (!hasChanges) {
-                // Check if the squash commit differs from the previous push
-                String commitDiff = gh.git(GitHubClient.Actor.BOT, repoDir,
-                        "diff", "origin/fix/" + issueNumber + "...HEAD", "--stat");
-                hasChanges = commitDiff != null && !commitDiff.isEmpty();
+            String verifyPrompt = """
+                    You are verifying that reviewer feedback was properly addressed in a pull request.
+
+                    The reviewer feedback was:
+                    %s
+
+                    The current code changes (diff):
+                    %s
+
+                    For EACH feedback point, determine if it was actually fixed in the code.
+                    Do NOT accept vague or partial fixes. Check the actual diff for concrete changes.
+
+                    Respond with a JSON object:
+                    {
+                      "all_addressed": true/false,
+                      "unaddressed": ["description of each unaddressed point"]
+                    }
+
+                    Output ONLY the JSON, nothing else.
+                    """.formatted(allFeedback, newDiff);
+
+            String verifyResult = claude.run(verifyPrompt, repoDir, 5);
+            boolean allAddressed = true;
+            String unaddressedPoints = "";
+
+            if (verifyResult != null) {
+                try {
+                    int jsonStart = verifyResult.indexOf('{');
+                    int jsonEnd = verifyResult.lastIndexOf('}') + 1;
+                    if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                        var verifyMapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                        var verifyJson = verifyMapper.readTree(verifyResult.substring(jsonStart, jsonEnd));
+                        allAddressed = verifyJson.path("all_addressed").asBoolean(false);
+                        var unaddressedArr = verifyJson.path("unaddressed");
+                        if (unaddressedArr.isArray() && unaddressedArr.size() > 0) {
+                            StringBuilder sb = new StringBuilder();
+                            for (var item : unaddressedArr) {
+                                sb.append("- ").append(item.asText()).append("\n");
+                            }
+                            unaddressedPoints = sb.toString();
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println("  Failed to parse verification result: " + e.getMessage());
+                }
             }
 
-            if (!hasChanges) {
+            if (!allAddressed) {
                 entry.attempts++;
-                System.out.println("  No code changes detected after addressing feedback (attempt "
-                        + entry.attempts + "/3). Claude may not have applied the fix.");
+                System.out.println("  Verification FAILED (attempt " + entry.attempts + "/3). Unaddressed:\n" + unaddressedPoints);
+
                 if (entry.attempts >= 3) {
                     gh.postComment(ownerRepo, entry.prNumber,
                             "I've attempted to address the feedback " + entry.attempts
-                                    + " times but couldn't apply the code changes. @" + config.githubUser
+                                    + " times but the verifier still finds unaddressed points:\n\n"
+                                    + unaddressedPoints + "\n@" + config.githubUser
                                     + " please fix manually.");
                     entry.feedbackText = null;
                     entry.lastUpdated = Instant.now();
                     return WorkflowState.IssueState.READY_FOR_REVIEW;
                 }
+
+                // Retry with more specific instructions including what wasn't fixed
+                entry.feedbackText = allFeedback + "\n\nPREVIOUS ATTEMPT FAILED. These points were NOT addressed:\n" + unaddressedPoints
+                        + "\nYou MUST make the actual code changes for these points. Do not just acknowledge them.";
                 return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
             }
+
+            System.out.println("  Verification PASSED — all feedback addressed.");
 
             if (!gh.pushForceLease(ownerRepo, issueNumber, repoDir)) {
                 System.out.println("  Push failed, will retry.");
