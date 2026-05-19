@@ -259,7 +259,7 @@ NEW ──► AWAITING_APPROVAL ──► CODING ──► SELF_REVIEWING
 - **You approve** — moves to SQUASHING
 - **Neither** — stays here
 
-**7. ADDRESSING_FEEDBACK** — The bot processes your comments, makes changes, squashes, force-pushes, reacts 👍 on each processed comment, and re-requests your review.
+**7. ADDRESSING_FEEDBACK** — The bot processes feedback from you and other org members, makes changes, squashes, force-pushes, replies to each review comment explaining what changed, reacts 👍 on each processed comment, and re-requests review from all reviewers who gave feedback.
 
 **8. SQUASHING** — The bot squashes all commits into a single clean commit.
 

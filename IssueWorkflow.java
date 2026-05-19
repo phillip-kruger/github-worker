@@ -547,7 +547,13 @@ public class IssueWorkflow {
 
             StringBuilder allFeedback = new StringBuilder();
             for (JsonNode c : comments) {
-                allFeedback.append("--- Comment ---\n").append(c.path("body").asText("")).append("\n\n");
+                String path = c.path("path").asText("");
+                String author = c.path("user").asText("");
+                allFeedback.append("--- Feedback");
+                if (!author.isEmpty()) allFeedback.append(" from @").append(author);
+                if (!path.isEmpty()) allFeedback.append(" on file: ").append(path);
+                allFeedback.append(" ---\n");
+                allFeedback.append(c.path("body").asText("")).append("\n\n");
             }
 
             String diff = gh.git(GitHubClient.Actor.BOT, repoDir,
@@ -556,20 +562,24 @@ public class IssueWorkflow {
             if (diff.length() > 15000) diff = diff.substring(0, 15000) + "\n... (truncated)";
 
             String prompt = """
-                    You are working on a pull request that has received feedback.
+                    You are working on a pull request that has received reviewer feedback.
+                    You MUST fix EVERY issue raised. Do not just acknowledge — actually change the code.
 
                     Current changes (diff against %s):
                     %s
 
-                    The reviewer left this feedback:
+                    Reviewer feedback (fix ALL of these):
 
                     %s
 
                     Instructions:
                     1. FIRST read CLAUDE.md, CONTRIBUTING.md, or similar guides in the repo root
-                    2. Address all feedback points
-                    3. Build using the project's recommended build command
-                    4. Squash everything into a single commit:
+                    2. Go through EACH feedback point and make the necessary code changes
+                    3. If a reviewer says assertions are weak, make them stronger with concrete checks
+                    4. If a reviewer points out a bug, fix the bug
+                    5. If a reviewer suggests a refactor, do the refactor
+                    6. Build and run tests to verify your changes work
+                    7. Squash everything into a single commit:
                        git reset --soft $(git merge-base HEAD upstream/%s) && git commit -m "your message"
 
                     Commit message rules:

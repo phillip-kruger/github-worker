@@ -380,14 +380,15 @@
 <!-- Discovery -->
 <section>
   <h2>Discovery</h2>
-  <p>Find issues you should look at — on demand</p>
+  <p>Find issues and PRs you should look at — on demand</p>
   <ul style="margin-top:0.8em;">
     <li>Configure topics: <code>GraphQL, Dev UI, OpenAPI, ...</code></li>
     <li>Scoped to orgs or repos: <code>quarkusio/quarkus, quarkiverse</code></li>
-    <li>Filters out issues that already have linked PRs</li>
+    <li>Issues matching your topics (without linked PRs)</li>
+    <li>PRs from others matching your topics or where you're CC'd</li>
+    <li>Issues/PRs where you're mentioned</li>
     <li>Loaded on demand — expand the panel in the dashboard</li>
     <li>Quick actions: 👀 react or self-assign</li>
-    <li>Items flow into the issue/review pipeline automatically</li>
   </ul>
 </section>
 
@@ -517,6 +518,9 @@ github-worker --once
 
 # Dry run (no writes)
 github-worker --dry-run
+
+# Run topic discovery (used by dashboard)
+github-worker --discover
   </code></pre>
 </section>
 
