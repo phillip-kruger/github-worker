@@ -256,7 +256,7 @@ public class GitHubClient {
                     ghJson(Actor.USER, args.toArray(new String[0])));
         }
 
-        // 2. Topics (issues without linked PRs — if it has a PR, someone is on it)
+        // 2. Topics — issues without linked PRs
         for (String topic : config.topics) {
             for (List<String> scope : scopeBatches) {
                 List<String> args = new ArrayList<>(List.of("search", "issues",
@@ -267,6 +267,31 @@ public class GitHubClient {
                 addDiscoveries(results, state, "issue", topic,
                         ghJson(Actor.USER, args.toArray(new String[0])));
             }
+        }
+
+        // 3. Topics — PRs from others that may need review
+        for (String topic : config.topics) {
+            for (List<String> scope : scopeBatches) {
+                List<String> args = new ArrayList<>(List.of("search", "prs",
+                        topic + " -author:" + config.githubUser + " -author:" + config.botUser,
+                        "--created", ">=" + since, "--state", "open", "--limit", "15",
+                        "--json", "repository,number,title,url"));
+                args.addAll(scope);
+                addDiscoveries(results, state, "pr", topic,
+                        ghJson(Actor.USER, args.toArray(new String[0])));
+            }
+        }
+
+        // 4. PRs where user is CC'd by quarkus-bot (search for /cc @user in comments)
+        for (List<String> scope : scopeBatches) {
+            List<String> args = new ArrayList<>(List.of("search", "prs",
+                    "/cc @" + config.githubUser,
+                    "--commenter", "quarkus-bot[bot]",
+                    "--created", ">=" + since, "--state", "open", "--limit", "20",
+                    "--json", "repository,number,title,url"));
+            args.addAll(scope);
+            addDiscoveries(results, state, "pr", "cc'd",
+                    ghJson(Actor.USER, args.toArray(new String[0])));
         }
 
         return new ArrayList<>(results.values());
@@ -288,6 +313,7 @@ public class GitHubClient {
 
             String title = n.path("title").asText("");
             if (title.startsWith("Bump quarkus") || title.startsWith("Bump io.quarkus")) continue;
+            if (title.startsWith("Add AI skill")) continue;
 
             WorkflowState.DiscoveryEntry entry = new WorkflowState.DiscoveryEntry();
             entry.title = title;
