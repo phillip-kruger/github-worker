@@ -492,6 +492,13 @@ public class IssueWorkflow {
             return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
         }
 
+        List<JsonNode> unreplied = gh.getUnrepliedReviewComments(ownerRepo, entry.prNumber);
+        if (!unreplied.isEmpty()) {
+            System.out.println("  Found " + unreplied.size() + " unreplied review comment(s) — addressing feedback.");
+            entry.lastUpdated = Instant.now();
+            return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
+        }
+
         System.out.println("  No approval or comments yet, waiting.");
         return WorkflowState.IssueState.READY_FOR_REVIEW;
     }
@@ -584,27 +591,55 @@ public class IssueWorkflow {
                 return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
             }
 
-            // Reply to all review comments that the bot hasn't replied to yet
+            // Reply to all review comments using full Claude with codebase access
             System.out.println("  Generating replies to review comments...");
             List<JsonNode> toReply = gh.getUnrepliedReviewComments(ownerRepo, entry.prNumber);
-            for (JsonNode c : toReply) {
-                long commentId = c.path("id").asLong();
-                String commentBody = c.path("body").asText("");
+            if (!toReply.isEmpty()) {
+                StringBuilder reviewComments = new StringBuilder();
+                for (int i = 0; i < toReply.size(); i++) {
+                    JsonNode c = toReply.get(i);
+                    reviewComments.append("Comment ").append(i + 1).append(" (id:").append(c.path("id").asLong()).append("):\n");
+                    reviewComments.append(c.path("body").asText("")).append("\n\n");
+                }
 
                 String replyPrompt = """
-                        A reviewer left this comment on a pull request:
+                        You are the author of this pull request. Reviewers left these comments.
+                        Look at the actual code in the repository to understand what was changed.
+                        Run `git diff upstream/%s...HEAD` to see the changes.
 
-                        "%s"
+                        For each comment, write a brief reply (1-2 sentences) explaining how the
+                        current code addresses the feedback. Reference specific code if relevant.
+                        If something wasn't fixed, say so honestly.
 
-                        You just pushed code changes to address this feedback.
-                        Write a brief reply (1-2 sentences) explaining what you changed to address it.
-                        If the feedback was about a code issue, mention the fix.
-                        Be concise and professional. Output ONLY the reply text.
-                        """.formatted(commentBody.length() > 500 ? commentBody.substring(0, 500) : commentBody);
+                        Reviewer comments:
+                        %s
 
-                String reply = claude.runBare(replyPrompt);
-                if (reply != null && !reply.isEmpty()) {
-                    gh.replyToPRComment(ownerRepo, entry.prNumber, commentId, reply);
+                        Respond with a JSON array where each element has:
+                        - "id": the comment id number
+                        - "reply": your reply text
+
+                        Output ONLY the JSON array.
+                        """.formatted(defaultBranch, reviewComments);
+
+                String repliesJson = claude.run(replyPrompt, repoDir, 5);
+                if (repliesJson != null) {
+                    try {
+                        int start = repliesJson.indexOf('[');
+                        int end = repliesJson.lastIndexOf(']') + 1;
+                        if (start >= 0 && end > start) {
+                            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                            var replies = mapper.readTree(repliesJson.substring(start, end));
+                            for (var r : replies) {
+                                long commentId = r.path("id").asLong();
+                                String reply = r.path("reply").asText("");
+                                if (!reply.isEmpty() && commentId > 0) {
+                                    gh.replyToPRComment(ownerRepo, entry.prNumber, commentId, reply);
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        System.err.println("  Failed to parse replies: " + e.getMessage());
+                    }
                 }
             }
 
