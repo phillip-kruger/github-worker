@@ -8,6 +8,10 @@
     "github-worker-ui": {
       "script-ref": "GitHubWorkerUI.java",
       "description": "House Elves dashboard for monitoring and controlling github-worker"
+    },
+    "github-worker-mcp": {
+      "script-ref": "GitHubWorkerMCP.java",
+      "description": "MCP server for monitoring and controlling github-worker"
     }
   }
 }
