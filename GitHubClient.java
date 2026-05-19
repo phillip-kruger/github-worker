@@ -127,22 +127,39 @@ public class GitHubClient {
 
     List<JsonNode> fetchAssignedIssues() {
         String since = LocalDate.now().minusDays(config.lookbackDays).format(DateTimeFormatter.ISO_DATE);
-        JsonNode result = ghJson(Actor.USER,
+        Map<String, JsonNode> deduped = new LinkedHashMap<>();
+
+        // Search by assignee
+        JsonNode assigned = ghJson(Actor.USER,
                 "search", "issues",
                 "--assignee", config.githubUser,
                 "--created", ">=" + since,
                 "--state", "open",
                 "--limit", "50",
                 "--json", "repository,title,url,number,createdAt,updatedAt,labels");
-        if (result == null || !result.isArray()) return List.of();
-        List<JsonNode> issues = new ArrayList<>();
+        addToMap(deduped, assigned);
+
+        // Also search by involves (catches reactions, comments, mentions)
+        JsonNode involved = ghJson(Actor.USER,
+                "search", "issues",
+                "--involves", config.githubUser,
+                "--created", ">=" + since,
+                "--state", "open",
+                "--limit", "50",
+                "--json", "repository,title,url,number,createdAt,updatedAt,labels");
+        addToMap(deduped, involved);
+
+        return new ArrayList<>(deduped.values());
+    }
+
+    private void addToMap(Map<String, JsonNode> map, JsonNode result) {
+        if (result == null || !result.isArray()) return;
         for (JsonNode n : result) {
-            String org = n.path("repository").path("nameWithOwner").asText("").split("/")[0];
-            if (!config.excludeOrgs.contains(org)) {
-                issues.add(n);
-            }
+            String ownerRepo = n.path("repository").path("nameWithOwner").asText("");
+            if (config.excludeOrgs.contains(ownerRepo.split("/")[0])) continue;
+            String key = ownerRepo + "#" + n.path("number").asInt();
+            map.putIfAbsent(key, n);
         }
-        return issues;
     }
 
     boolean wasSelfAssigned(String ownerRepo, int number) {
