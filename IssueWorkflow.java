@@ -514,7 +514,7 @@ public class IssueWorkflow {
         System.out.println("Addressing feedback: " + ownerRepo + "#" + issueNumber);
         System.out.println("=".repeat(60));
 
-        List<JsonNode> comments = gh.getUnprocessedPRComments(ownerRepo, entry.prNumber);
+        List<JsonNode> comments = new java.util.ArrayList<>(gh.getUnprocessedPRComments(ownerRepo, entry.prNumber));
         List<JsonNode> unreplied = gh.getUnrepliedReviewComments(ownerRepo, entry.prNumber);
 
         if (comments.isEmpty() && unreplied.isEmpty()) {
@@ -523,10 +523,12 @@ public class IssueWorkflow {
             return WorkflowState.IssueState.READY_FOR_REVIEW;
         }
 
-        // If we have unreplied comments but no new unprocessed ones, use the unreplied as feedback
-        if (comments.isEmpty() && !unreplied.isEmpty()) {
-            System.out.println("  Found " + unreplied.size() + " unreplied review comment(s).");
-            for (JsonNode c : unreplied) {
+        // Include unreplied review comments as feedback too
+        for (JsonNode c : unreplied) {
+            String key = c.path("id").asText();
+            boolean alreadyIncluded = comments.stream().anyMatch(
+                    existing -> existing.path("id").asText().equals(key));
+            if (!alreadyIncluded) {
                 comments.add(c);
             }
         }
