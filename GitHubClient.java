@@ -847,12 +847,19 @@ public class GitHubClient {
         Path mainDir = mainCloneDir(ownerRepo);
 
         if (java.nio.file.Files.isDirectory(mainDir.resolve(".git"))) {
-            String defaultBranch = getDefaultBranch(ownerRepo);
-            git(Actor.BOT, mainDir, "fetch", "upstream", defaultBranch);
-            git(Actor.BOT, mainDir, "fetch", "origin");
-            git(Actor.BOT, mainDir, "checkout", defaultBranch);
-            git(Actor.BOT, mainDir, "reset", "--hard", "upstream/" + defaultBranch);
-            return mainDir;
+            // Check if this clone was properly set up (has upstream remote)
+            String remotes = git(Actor.BOT, mainDir, "remote");
+            if (remotes == null || !remotes.contains("upstream")) {
+                System.out.println("  Main clone missing upstream remote, recreating...");
+                deleteDir(mainDir);
+            } else {
+                String defaultBranch = getDefaultBranch(ownerRepo);
+                git(Actor.BOT, mainDir, "fetch", "upstream", defaultBranch);
+                git(Actor.BOT, mainDir, "fetch", "origin");
+                git(Actor.BOT, mainDir, "checkout", defaultBranch);
+                git(Actor.BOT, mainDir, "reset", "--hard", "upstream/" + defaultBranch);
+                return mainDir;
+            }
         }
 
         java.nio.file.Files.createDirectories(mainDir.getParent());
