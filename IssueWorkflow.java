@@ -529,6 +529,14 @@ public class IssueWorkflow {
             return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
         }
 
+        // Check if user thumbsup'd the bot's self-review comment — means "go fix these"
+        if (gh.hasBotReviewThumbsUp(ownerRepo, entry.prNumber)) {
+            System.out.println("  👍 on bot's review — re-entering self-review.");
+            entry.feedbackText = null;
+            entry.lastUpdated = Instant.now();
+            return WorkflowState.IssueState.SELF_REVIEWING;
+        }
+
         System.out.println("  No approval or comments yet, waiting.");
         return WorkflowState.IssueState.READY_FOR_REVIEW;
     }

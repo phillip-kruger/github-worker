@@ -180,6 +180,57 @@ public class GitHubClient {
         return prs != null && prs.isArray() && prs.size() > 0;
     }
 
+    boolean hasBotReviewThumbsUp(String ownerRepo, int prNumber) {
+        // Check if user 👍'd any of the bot's PR review comments
+        String jq = "[.[] | select(.user.login == \"" + config.botUser
+                + "\" and .body != \"\" and .body != null) | .id]";
+        String result = ghText(Actor.USER,
+                "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/reviews",
+                "--jq", jq);
+        if (result == null || result.isEmpty()) return false;
+        try {
+            JsonNode ids = mapper.readTree(result);
+            for (JsonNode idNode : ids) {
+                long reviewId = idNode.asLong();
+                // Check reactions on the review itself (issue comment endpoint)
+                // PR reviews are also accessible as issue comments for reactions
+                String rjq = "[.[] | select(.user.login == \"" + config.githubUser
+                        + "\" and .content == \"+1\")]";
+                // Use the pulls reviews endpoint for reactions
+                String rResult = ghText(Actor.USER,
+                        "api", "repos/" + ownerRepo + "/pulls/" + prNumber
+                                + "/reviews/" + reviewId + "/reactions",
+                        "--jq", rjq);
+                if (rResult != null && !rResult.isEmpty()) {
+                    JsonNode arr = mapper.readTree(rResult);
+                    if (arr.isArray() && arr.size() > 0) return true;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+
+        // Also check bot's issue comments (posted as regular comments, not reviews)
+        String jq2 = "[.[] | select(.user.login == \"" + config.botUser + "\") | .id]";
+        String result2 = ghText(Actor.USER,
+                "api", "repos/" + ownerRepo + "/issues/" + prNumber + "/comments",
+                "--jq", jq2);
+        if (result2 == null || result2.isEmpty()) return false;
+        try {
+            JsonNode ids = mapper.readTree(result2);
+            for (JsonNode idNode : ids) {
+                long commentId = idNode.asLong();
+                if (hasReactionFromUser(ownerRepo, commentId, "+1")) {
+                    // Check the bot hasn't already processed this thumbsup
+                    if (!hasBotReaction(ownerRepo, commentId, "issues")) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
     boolean isPRMerged(String ownerRepo, int prNumber) {
         JsonNode pr = ghJson(Actor.USER,
                 "pr", "view", String.valueOf(prNumber),
