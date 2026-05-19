@@ -276,7 +276,7 @@ public class GitHubWorker implements Callable<Integer> {
         for (var entry : state.issues.entrySet()) {
             String key = entry.getKey();
             WorkflowState.IssueEntry issue = entry.getValue();
-            if (issue.state == WorkflowState.IssueState.DONE) continue;
+            if (issue.state == WorkflowState.IssueState.MERGED) continue;
 
             WorkflowState.IssueState before = issue.state;
             try {

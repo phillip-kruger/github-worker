@@ -21,7 +21,7 @@ public class WorkflowState {
     enum IssueState {
         NEW, AWAITING_APPROVAL, CODING, SELF_REVIEWING, FIXING_REVIEW,
         READY_FOR_REVIEW, ADDRESSING_FEEDBACK, SQUASHING, MONITORING_CI,
-        FIXING_CI, DONE
+        FIXING_CI, DONE, MERGED
     }
 
     enum ReviewState {
@@ -100,7 +100,7 @@ public class WorkflowState {
     void prune(int lookbackDays) {
         Instant cutoff = Instant.now().minus(lookbackDays, ChronoUnit.DAYS);
         issues.entrySet().removeIf(e ->
-                e.getValue().state == IssueState.DONE && e.getValue().lastUpdated.isBefore(cutoff));
+                e.getValue().state == IssueState.MERGED && e.getValue().lastUpdated.isBefore(cutoff));
         reviews.entrySet().removeIf(e ->
                 e.getValue().state == ReviewState.DONE && e.getValue().lastUpdated.isBefore(cutoff));
     }

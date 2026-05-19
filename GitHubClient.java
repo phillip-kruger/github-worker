@@ -180,6 +180,15 @@ public class GitHubClient {
         return prs != null && prs.isArray() && prs.size() > 0;
     }
 
+    boolean isPRMerged(String ownerRepo, int prNumber) {
+        JsonNode pr = ghJson(Actor.USER,
+                "pr", "view", String.valueOf(prNumber),
+                "--repo", ownerRepo,
+                "--json", "state");
+        if (pr == null) return false;
+        return "MERGED".equalsIgnoreCase(pr.path("state").asText(""));
+    }
+
     boolean isBotReviewRequested(String ownerRepo, int prNumber) {
         JsonNode pr = ghJson(Actor.USER,
                 "pr", "view", String.valueOf(prNumber),

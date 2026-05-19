@@ -37,7 +37,8 @@ public class IssueWorkflow {
             case SQUASHING -> handleSquashing(entry);
             case MONITORING_CI -> handleMonitoringCI(entry);
             case FIXING_CI -> handleFixingCI(entry);
-            case DONE -> WorkflowState.IssueState.DONE;
+            case DONE -> handleDone(entry);
+            case MERGED -> WorkflowState.IssueState.MERGED;
         };
     }
 
@@ -885,6 +886,19 @@ public class IssueWorkflow {
         } finally {
             if (repoDir != null) gh.cleanupWorktree(entry.ownerRepo, entry.issueNumber);
         }
+    }
+
+    // --- DONE: Check if PR was merged ---
+
+    private WorkflowState.IssueState handleDone(WorkflowState.IssueEntry entry) {
+        if (entry.prNumber != null && entry.prNumber > 0) {
+            if (gh.isPRMerged(entry.ownerRepo, entry.prNumber)) {
+                System.out.println("  " + entry.ownerRepo + "#" + entry.prNumber + " merged!");
+                entry.lastUpdated = Instant.now();
+                return WorkflowState.IssueState.MERGED;
+            }
+        }
+        return WorkflowState.IssueState.DONE;
     }
 
     // --- Helpers ---
