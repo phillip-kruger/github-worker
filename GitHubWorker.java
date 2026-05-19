@@ -174,7 +174,43 @@ public class GitHubWorker implements Callable<Integer> {
             state.reviews.put(key, entry);
         }
 
-        // 2b. Promote discovered items that have 👀 reaction to tracked issues/reviews
+        // 2b. Find items with 👀 reaction via GraphQL
+        System.out.println("\nChecking for 👀 reactions in configured repos...");
+        List<JsonNode> eyesItems = gh.fetchEyesReactedItems();
+        for (JsonNode item : eyesItems) {
+            String ownerRepo = item.path("ownerRepo").asText("");
+            int number = item.path("number").asInt();
+            String key = ownerRepo + "#" + number;
+            String title = item.path("title").asText("");
+            String type = item.path("type").asText("issue");
+
+            if (state.issues.containsKey(key) || state.reviews.containsKey(key)) continue;
+
+            System.out.println("  " + key + ": Found 👀 — adding to tracking as " + type);
+
+            if (!preview) {
+                if ("pr".equals(type)) {
+                    WorkflowState.ReviewEntry re = new WorkflowState.ReviewEntry();
+                    re.title = title;
+                    re.ownerRepo = ownerRepo;
+                    re.prNumber = number;
+                    JsonNode extras = gh.fetchPRExtras(ownerRepo, number);
+                    if (extras != null) {
+                        re.headBranch = extras.path("headRefName").asText("");
+                        re.author = extras.path("author").path("login").asText("");
+                    }
+                    state.reviews.put(key, re);
+                } else {
+                    WorkflowState.IssueEntry ie = new WorkflowState.IssueEntry();
+                    ie.title = title;
+                    ie.ownerRepo = ownerRepo;
+                    ie.issueNumber = number;
+                    state.issues.put(key, ie);
+                }
+            }
+        }
+
+        // 2c. Promote discovered items that have 👀 reaction to tracked issues/reviews
         if (!state.discoveries.isEmpty()) {
             var toPromote = new java.util.ArrayList<String>();
             for (var entry : state.discoveries.entrySet()) {

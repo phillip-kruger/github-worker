@@ -127,39 +127,22 @@ public class GitHubClient {
 
     List<JsonNode> fetchAssignedIssues() {
         String since = LocalDate.now().minusDays(config.lookbackDays).format(DateTimeFormatter.ISO_DATE);
-        Map<String, JsonNode> deduped = new LinkedHashMap<>();
-
-        // Search by assignee
-        JsonNode assigned = ghJson(Actor.USER,
+        JsonNode result = ghJson(Actor.USER,
                 "search", "issues",
                 "--assignee", config.githubUser,
                 "--created", ">=" + since,
                 "--state", "open",
                 "--limit", "50",
                 "--json", "repository,title,url,number,createdAt,updatedAt,labels");
-        addToMap(deduped, assigned);
-
-        // Also search by involves (catches reactions, comments, mentions)
-        JsonNode involved = ghJson(Actor.USER,
-                "search", "issues",
-                "--involves", config.githubUser,
-                "--created", ">=" + since,
-                "--state", "open",
-                "--limit", "50",
-                "--json", "repository,title,url,number,createdAt,updatedAt,labels");
-        addToMap(deduped, involved);
-
-        return new ArrayList<>(deduped.values());
-    }
-
-    private void addToMap(Map<String, JsonNode> map, JsonNode result) {
-        if (result == null || !result.isArray()) return;
+        if (result == null || !result.isArray()) return List.of();
+        List<JsonNode> issues = new ArrayList<>();
         for (JsonNode n : result) {
-            String ownerRepo = n.path("repository").path("nameWithOwner").asText("");
-            if (config.excludeOrgs.contains(ownerRepo.split("/")[0])) continue;
-            String key = ownerRepo + "#" + n.path("number").asInt();
-            map.putIfAbsent(key, n);
+            String org = n.path("repository").path("nameWithOwner").asText("").split("/")[0];
+            if (!config.excludeOrgs.contains(org)) {
+                issues.add(n);
+            }
         }
+        return issues;
     }
 
     boolean wasSelfAssigned(String ownerRepo, int number) {
@@ -195,6 +178,104 @@ public class GitHubClient {
                 "--head", config.botUser + ":" + branch,
                 "--json", "number");
         return prs != null && prs.isArray() && prs.size() > 0;
+    }
+
+    // --- Eyes reaction discovery (GraphQL) ---
+
+    List<JsonNode> fetchEyesReactedItems() {
+        List<JsonNode> results = new ArrayList<>();
+        for (String scope : config.orgs) {
+            if (scope.contains("/")) {
+                fetchEyesForRepo(scope, results);
+            }
+            // Skip whole-org scopes — too many repos to query individually
+        }
+        return results;
+    }
+
+    private void fetchEyesForRepo(String ownerRepo, List<JsonNode> results) {
+        String query = """
+                {
+                  search(query: "repo:%s is:open", type: ISSUE, first: 50) {
+                    nodes {
+                      ... on Issue {
+                        number
+                        title
+                        url
+                        __typename
+                      }
+                      ... on PullRequest {
+                        number
+                        title
+                        url
+                        __typename
+                      }
+                    }
+                  }
+                }
+                """.formatted(ownerRepo);
+
+        // Use a simpler approach: search open issues/PRs and check eyes per-item
+        // Actually, use the GraphQL reaction filter directly
+        String gqlQuery = "repo:" + ownerRepo + " is:open";
+
+        for (String type : List.of("ISSUE", "PR")) {
+            String searchType = "ISSUE".equals(type) ? "is:issue" : "is:pr";
+            String fullQuery = gqlQuery + " " + searchType;
+
+            String graphql = """
+                    {
+                      search(query: "%s", type: ISSUE, first: 30) {
+                        nodes {
+                          ... on Issue {
+                            number
+                            title
+                            url
+                            reactions(content: EYES, first: 5) {
+                              nodes { user { login } }
+                            }
+                          }
+                          ... on PullRequest {
+                            number
+                            title
+                            url
+                            reactions(content: EYES, first: 5) {
+                              nodes { user { login } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                    """.formatted(fullQuery);
+
+            String result = ghText(Actor.USER, "api", "graphql", "-f", "query=" + graphql);
+            if (result == null) continue;
+
+            try {
+                JsonNode data = mapper.readTree(result);
+                JsonNode nodes = data.path("data").path("search").path("nodes");
+                for (JsonNode node : nodes) {
+                    JsonNode reactions = node.path("reactions").path("nodes");
+                    boolean hasUserEyes = false;
+                    for (JsonNode r : reactions) {
+                        if (config.githubUser.equals(r.path("user").path("login").asText())) {
+                            hasUserEyes = true;
+                            break;
+                        }
+                    }
+                    if (hasUserEyes) {
+                        var obj = mapper.createObjectNode();
+                        obj.put("number", node.path("number").asInt());
+                        obj.put("title", node.path("title").asText());
+                        obj.put("url", node.path("url").asText());
+                        obj.put("type", "ISSUE".equals(type) ? "issue" : "pr");
+                        obj.put("ownerRepo", ownerRepo);
+                        results.add(obj);
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     // --- Review discovery ---
