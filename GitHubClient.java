@@ -301,6 +301,15 @@ public class GitHubClient {
         }
     }
 
+    private final Map<String, Boolean> orgMemberCache = new java.util.HashMap<>();
+
+    boolean isOrgMember(String ownerRepo, String user) {
+        String org = ownerRepo.split("/")[0];
+        String cacheKey = org + "/" + user;
+        return orgMemberCache.computeIfAbsent(cacheKey, k ->
+                ghExitCode(Actor.USER, "api", "orgs/" + org + "/members/" + user) == 0);
+    }
+
     private boolean isInAllowedOrgs(String ownerRepo) {
         if (config.orgs.isEmpty()) return true;
         String org = ownerRepo.split("/")[0];
@@ -421,7 +430,8 @@ public class GitHubClient {
     }
 
     void requestReview(String ownerRepo, int prNumber, String reviewer) {
-        ghText(Actor.BOT,
+        // Use USER token — bot doesn't have permission to request reviewers on upstream
+        ghText(Actor.USER,
                 "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/requested_reviewers",
                 "-X", "POST",
                 "-f", "reviewers[]=" + reviewer);
@@ -452,36 +462,53 @@ public class GitHubClient {
         JsonNode reviews = data.path("reviews");
         if (!reviews.isArray()) return ReviewVerdict.NONE;
 
-        // Find the latest review from the user
-        String latestState = null;
+        // Check the latest review from the user first
+        String userLatest = null;
         for (JsonNode r : reviews) {
             if (config.githubUser.equals(r.path("author").path("login").asText())) {
-                latestState = r.path("state").asText();
+                userLatest = r.path("state").asText();
+            }
+        }
+        if ("APPROVED".equals(userLatest)) return ReviewVerdict.APPROVED;
+        if ("CHANGES_REQUESTED".equals(userLatest)) return ReviewVerdict.CHANGES_REQUESTED;
+
+        // Also check reviews from trusted users (org members)
+        for (JsonNode r : reviews) {
+            String reviewer = r.path("author").path("login").asText("");
+            if (reviewer.equals(config.botUser)) continue;
+            if (reviewer.equals(config.githubUser)) continue;
+            String state = r.path("state").asText();
+            if ("CHANGES_REQUESTED".equals(state) && isOrgMember(ownerRepo, reviewer)) {
+                return ReviewVerdict.CHANGES_REQUESTED;
             }
         }
 
-        if ("APPROVED".equals(latestState)) return ReviewVerdict.APPROVED;
-        if ("CHANGES_REQUESTED".equals(latestState)) return ReviewVerdict.CHANGES_REQUESTED;
         return ReviewVerdict.NONE;
     }
 
     /**
-     * Get all feedback from the user on a PR — both issue comments (conversation)
-     * and PR review comments (line-level), that the bot hasn't reacted 👍 to yet.
+     * Get all actionable feedback on a PR. This includes:
+     * - Comments from the user
+     * - Comments from other users that the user has thumbsup'd (endorsing the feedback)
+     * - Review comments from any reviewer (not just the user)
+     * - Review body text from any reviewer
+     * All filtered to exclude items the bot has already reacted to.
      */
     List<JsonNode> getUnprocessedPRComments(String ownerRepo, int prNumber) {
         List<JsonNode> unprocessed = new ArrayList<>();
 
-        // 1. Issue comments (conversation tab)
-        String jq = "[.[] | select(.user.login == \"" + config.githubUser
-                + "\") | {id: .id, body: .body, created_at: .created_at, type: \"issue\"}]";
+        // 1. Issue comments (conversation tab) — from user OR thumbsup'd by user
+        String jq = "[.[] | select(.user.login != \"" + config.botUser
+                + "\") | {id: .id, body: .body, user: .user.login, created_at: .created_at, type: \"issue\"}]";
         String result = ghText(Actor.USER,
                 "api", "repos/" + ownerRepo + "/issues/" + prNumber + "/comments",
                 "--paginate", "--jq", jq);
         if (result != null) {
             try {
                 for (JsonNode c : mapper.readTree(result)) {
-                    if (!hasBotReaction(ownerRepo, c.path("id").asLong(), "issues")) {
+                    if (hasBotReaction(ownerRepo, c.path("id").asLong(), "issues")) continue;
+                    String author = c.path("user").asText("");
+                    if (author.equals(config.githubUser) || hasUserThumbsUp(ownerRepo, c.path("id").asLong(), "issues")) {
                         unprocessed.add(c);
                     }
                 }
@@ -489,16 +516,18 @@ public class GitHubClient {
             }
         }
 
-        // 2. PR review comments (line-level comments on the diff)
-        String jq2 = "[.[] | select(.user.login == \"" + config.githubUser
-                + "\") | {id: .id, body: .body, path: .path, created_at: .created_at, type: \"review\"}]";
+        // 2. PR review comments (line-level) — from user OR thumbsup'd by user
+        String jq2 = "[.[] | select(.user.login != \"" + config.botUser
+                + "\") | {id: .id, body: .body, path: .path, user: .user.login, created_at: .created_at, type: \"review\"}]";
         String result2 = ghText(Actor.USER,
                 "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/comments",
                 "--paginate", "--jq", jq2);
         if (result2 != null) {
             try {
                 for (JsonNode c : mapper.readTree(result2)) {
-                    if (!hasBotReaction(ownerRepo, c.path("id").asLong(), "pulls")) {
+                    if (hasBotReaction(ownerRepo, c.path("id").asLong(), "pulls")) continue;
+                    String author = c.path("user").asText("");
+                    if (author.equals(config.githubUser) || hasUserThumbsUp(ownerRepo, c.path("id").asLong(), "pulls")) {
                         unprocessed.add(c);
                     }
                 }
@@ -506,23 +535,84 @@ public class GitHubClient {
             }
         }
 
-        // 3. PR review body text (the summary comment on a review)
-        String jq3 = "[.[] | select(.user.login == \"" + config.githubUser
-                + "\" and .body != \"\" and .body != null) | {id: .id, body: .body, state: .state}]";
+        // 3. PR review body text — from user OR trusted reviewer with CHANGES_REQUESTED
+        String jq3 = "[.[] | select(.user.login != \"" + config.botUser
+                + "\" and .body != \"\" and .body != null) | {id: .id, body: .body, state: .state, user: .user.login}]";
         String result3 = ghText(Actor.USER,
                 "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/reviews",
                 "--jq", jq3);
         if (result3 != null) {
             try {
                 for (JsonNode c : mapper.readTree(result3)) {
-                    // Include review bodies as feedback (no reaction tracking for these)
-                    unprocessed.add(c);
+                    String author = c.path("user").asText("");
+                    String state = c.path("state").asText("");
+                    if (author.equals(config.githubUser)) {
+                        unprocessed.add(c);
+                    } else if ("CHANGES_REQUESTED".equals(state) && isOrgMember(ownerRepo, author)) {
+                        unprocessed.add(c);
+                    }
                 }
             } catch (Exception ignored) {
             }
         }
 
         return unprocessed;
+    }
+
+    private boolean hasUserThumbsUp(String ownerRepo, long commentId, String commentType) {
+        String endpoint = "issues".equals(commentType)
+                ? "repos/" + ownerRepo + "/issues/comments/" + commentId + "/reactions"
+                : "repos/" + ownerRepo + "/pulls/comments/" + commentId + "/reactions";
+        String rjq = "[.[] | select(.user.login == \"" + config.githubUser
+                + "\" and .content == \"+1\")]";
+        String rResult = ghText(Actor.USER, "api", endpoint, "--jq", rjq);
+        if (rResult == null || rResult.isEmpty()) return false;
+        try {
+            JsonNode arr = mapper.readTree(rResult);
+            return arr.isArray() && arr.size() > 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    List<JsonNode> getUnrepliedReviewComments(String ownerRepo, int prNumber) {
+        String jq = "[.[] | {id: .id, body: .body, user: .user.login, in_reply_to_id: .in_reply_to_id}]";
+        String result = ghText(Actor.USER,
+                "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/comments",
+                "--paginate", "--jq", jq);
+        if (result == null) return List.of();
+        try {
+            JsonNode all = mapper.readTree(result);
+            // Find comment IDs that the bot has already replied to
+            java.util.Set<Long> repliedTo = new java.util.HashSet<>();
+            for (JsonNode c : all) {
+                if (config.botUser.equals(c.path("user").asText(""))) {
+                    long replyTo = c.path("in_reply_to_id").asLong(0);
+                    if (replyTo > 0) repliedTo.add(replyTo);
+                }
+            }
+            // Return top-level comments from non-bot users that have no bot reply
+            List<JsonNode> unreplied = new ArrayList<>();
+            for (JsonNode c : all) {
+                String user = c.path("user").asText("");
+                if (user.equals(config.botUser)) continue;
+                long id = c.path("id").asLong();
+                long replyTo = c.path("in_reply_to_id").asLong(0);
+                if (replyTo == 0 && !repliedTo.contains(id)) {
+                    unreplied.add(c);
+                }
+            }
+            return unreplied;
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    void replyToPRComment(String ownerRepo, int prNumber, long commentId, String body) {
+        ghText(Actor.BOT,
+                "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/comments/" + commentId + "/replies",
+                "-X", "POST",
+                "-f", "body=" + body);
     }
 
     void reactToPRComment(String ownerRepo, long commentId) {

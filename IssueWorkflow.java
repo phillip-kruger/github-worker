@@ -508,10 +508,20 @@ public class IssueWorkflow {
         System.out.println("=".repeat(60));
 
         List<JsonNode> comments = gh.getUnprocessedPRComments(ownerRepo, entry.prNumber);
-        if (comments.isEmpty()) {
-            System.out.println("  No unprocessed comments found.");
+        List<JsonNode> unreplied = gh.getUnrepliedReviewComments(ownerRepo, entry.prNumber);
+
+        if (comments.isEmpty() && unreplied.isEmpty()) {
+            System.out.println("  No unprocessed comments or unreplied reviews found.");
             entry.lastUpdated = Instant.now();
             return WorkflowState.IssueState.READY_FOR_REVIEW;
+        }
+
+        // If we have unreplied comments but no new unprocessed ones, use the unreplied as feedback
+        if (comments.isEmpty() && !unreplied.isEmpty()) {
+            System.out.println("  Found " + unreplied.size() + " unreplied review comment(s).");
+            for (JsonNode c : unreplied) {
+                comments.add(c);
+            }
         }
 
         if (dryRun) {
@@ -574,6 +584,31 @@ public class IssueWorkflow {
                 return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
             }
 
+            // Reply to all review comments that the bot hasn't replied to yet
+            System.out.println("  Generating replies to review comments...");
+            List<JsonNode> toReply = gh.getUnrepliedReviewComments(ownerRepo, entry.prNumber);
+            for (JsonNode c : toReply) {
+                long commentId = c.path("id").asLong();
+                String commentBody = c.path("body").asText("");
+
+                String replyPrompt = """
+                        A reviewer left this comment on a pull request:
+
+                        "%s"
+
+                        You just pushed code changes to address this feedback.
+                        Write a brief reply (1-2 sentences) explaining what you changed to address it.
+                        If the feedback was about a code issue, mention the fix.
+                        Be concise and professional. Output ONLY the reply text.
+                        """.formatted(commentBody.length() > 500 ? commentBody.substring(0, 500) : commentBody);
+
+                String reply = claude.runBare(replyPrompt);
+                if (reply != null && !reply.isEmpty()) {
+                    gh.replyToPRComment(ownerRepo, entry.prNumber, commentId, reply);
+                }
+            }
+
+            // React to processed comments
             for (JsonNode c : comments) {
                 long commentId = c.path("id").asLong();
                 String type = c.path("type").asText("issue");
@@ -584,7 +619,18 @@ public class IssueWorkflow {
                 }
             }
 
-            gh.requestReview(ownerRepo, entry.prNumber, config.githubUser);
+            // Re-request review from all reviewers who gave feedback
+            java.util.Set<String> reviewers = new java.util.HashSet<>();
+            reviewers.add(config.githubUser);
+            for (JsonNode c : comments) {
+                String author = c.path("user").asText("");
+                if (!author.isEmpty() && !author.equals(config.botUser)) {
+                    reviewers.add(author);
+                }
+            }
+            for (String reviewer : reviewers) {
+                gh.requestReview(ownerRepo, entry.prNumber, reviewer);
+            }
 
             System.out.println("  Feedback addressed, re-requested review.");
             entry.lastUpdated = Instant.now();
