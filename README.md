@@ -126,6 +126,40 @@ github-worker --discover
 
 Or use the dashboard at `http://github-worker.house-elves:7478` to trigger runs and monitor progress.
 
+## MCP Server
+
+An MCP server is included so AI agents (Claude Code sessions) can check on progress, trigger runs, and manage tracked items without the dashboard.
+
+### Setup
+
+Add to your global Claude Code MCP config (`~/.claude/.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "github-worker": {
+      "command": "jbang",
+      "args": ["github-worker-mcp@House-elves/github-worker"]
+    }
+  }
+}
+```
+
+Or for a specific project, add to `.mcp.json` in the project root.
+
+### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `worker_status` | Show all tracked issues and reviews with current state |
+| `worker_trigger` | Trigger a worker run |
+| `worker_preview` | Preview what the worker would pick up |
+| `worker_retry` | Retry a stuck item (resets to previous state) |
+| `worker_add` | Add an issue or PR to tracking by URL or key |
+| `worker_remove` | Remove an item from tracking |
+| `worker_discover` | Run topic-based discovery |
+| `worker_logs` | Show recent worker logs |
+
 ## How it works
 
 The worker uses two GitHub accounts:
