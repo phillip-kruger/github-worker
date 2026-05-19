@@ -180,6 +180,20 @@ public class GitHubClient {
         return prs != null && prs.isArray() && prs.size() > 0;
     }
 
+    boolean isBotReviewRequested(String ownerRepo, int prNumber) {
+        JsonNode pr = ghJson(Actor.USER,
+                "pr", "view", String.valueOf(prNumber),
+                "--repo", ownerRepo,
+                "--json", "reviewRequests");
+        if (pr == null) return false;
+        JsonNode requests = pr.path("reviewRequests");
+        if (!requests.isArray()) return false;
+        for (JsonNode r : requests) {
+            if (config.botUser.equals(r.path("login").asText())) return true;
+        }
+        return false;
+    }
+
     // --- Eyes reaction discovery (GraphQL) ---
 
     List<JsonNode> fetchEyesReactedItems() {

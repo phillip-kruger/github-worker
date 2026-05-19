@@ -249,6 +249,17 @@ public class GitHubWorker implements Callable<Integer> {
             }
         }
 
+        // 2d. Re-activate DONE reviews that have been re-requested
+        for (var entry : state.reviews.entrySet()) {
+            WorkflowState.ReviewEntry review = entry.getValue();
+            if (review.state != WorkflowState.ReviewState.DONE) continue;
+            if (gh.isBotReviewRequested(review.ownerRepo, review.prNumber)) {
+                System.out.println("  " + entry.getKey() + ": Re-requested for review — reactivating.");
+                review.state = WorkflowState.ReviewState.NEW;
+                review.lastUpdated = java.time.Instant.now();
+            }
+        }
+
         if (preview) {
             System.out.println("\nTracked issues:");
             for (var e : state.issues.entrySet()) {
