@@ -1062,7 +1062,13 @@ public class GitHubClient {
     }
 
     boolean pushForceLease(String ownerRepo, int issueNumber, Path repoDir) {
+        String defaultBranch = getDefaultBranch(ownerRepo);
         String branch = "fix/" + issueNumber;
+
+        // Always rebase on fresh upstream before pushing to avoid stale changes
+        git(Actor.BOT, repoDir, "fetch", "upstream", defaultBranch);
+        git(Actor.BOT, repoDir, "rebase", "upstream/" + defaultBranch);
+
         String result = git(Actor.BOT, repoDir, "push", "--force-with-lease", "-u", "origin", branch);
         return result != null;
     }
