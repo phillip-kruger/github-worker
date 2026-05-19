@@ -377,7 +377,8 @@ public class IssueWorkflow {
             }
 
             System.out.println("  Self-review found issues, posting and moving to fix.");
-            gh.postPRReview(ownerRepo, entry.prNumber, reviewOutput);
+            Long reviewCommentId = gh.postComment(ownerRepo, entry.prNumber, reviewOutput);
+            entry.botCommentId = reviewCommentId;
             entry.feedbackText = reviewOutput;
             return WorkflowState.IssueState.FIXING_REVIEW;
 
