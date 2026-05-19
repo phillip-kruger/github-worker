@@ -414,13 +414,21 @@ public class IssueWorkflow {
             }
 
             String fixPrompt = """
-                    A code review found the following issues with your changes:
+                    A code review found issues with your changes. You MUST fix every issue listed below.
+                    Do NOT just acknowledge the problems — actually change the code.
+
+                    Review findings:
 
                     %s
 
-                    Please fix all the issues raised in the review.
-                    Then squash everything into a single commit using:
-                    git reset --soft $(git merge-base HEAD upstream/%s) && git commit -m "your message"
+                    Instructions:
+                    1. FIRST read CLAUDE.md, CONTRIBUTING.md, or similar guides in the repo root
+                    2. Go through EACH issue marked as critical, bug, or problem
+                    3. Make the actual code change for each one
+                    4. Verify your changes by reading the modified files
+                    5. Build and run tests to confirm the fix works
+                    6. Squash everything into a single commit:
+                       git reset --soft $(git merge-base HEAD upstream/%s) && git commit -m "your message"
 
                     Commit message rules:
                     - Write a clear, natural-language sentence starting with an uppercase letter
@@ -434,6 +442,27 @@ public class IssueWorkflow {
             String result = claude.run(fixPrompt, repoDir);
             if (result == null) {
                 System.out.println("  Fix failed, will retry.");
+                return WorkflowState.IssueState.FIXING_REVIEW;
+            }
+
+            // Verify that changes were actually made
+            String diffCheck = gh.git(GitHubClient.Actor.BOT, repoDir,
+                    "diff", "HEAD~1", "--stat");
+            if (diffCheck == null || diffCheck.isEmpty()) {
+                System.out.println("  No changes detected after fix attempt — Claude may not have applied the fix. Retrying.");
+                entry.attempts++;
+                if (entry.attempts >= 3) {
+                    System.out.println("  Max fix attempts reached. Moving to ready for manual review.");
+                    gh.postComment(ownerRepo, entry.prNumber,
+                            "I attempted to fix the self-review findings " + entry.attempts
+                                    + " times but couldn't apply the changes. @" + config.githubUser
+                                    + " please review and fix manually.");
+                    gh.addReviewer(ownerRepo, entry.prNumber, config.githubUser);
+                    gh.markPRReady(ownerRepo, entry.prNumber);
+                    entry.feedbackText = null;
+                    entry.lastUpdated = Instant.now();
+                    return WorkflowState.IssueState.READY_FOR_REVIEW;
+                }
                 return WorkflowState.IssueState.FIXING_REVIEW;
             }
 
