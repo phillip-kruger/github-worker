@@ -271,7 +271,8 @@ NEW ──► AWAITING_APPROVAL ──► CODING ──► SELF_REVIEWING
  │                                               │   pass?─┤─ fail?
  │                                               │    │         │
  │                                               │   DONE    FIXING_CI
- │                                               │              │
+ │                                               │    │          │
+ │                                               │  MERGED       │
  └───────────────────────────────────────────────┴──────────────┘
 ```
 
@@ -290,10 +291,12 @@ NEW ──► AWAITING_APPROVAL ──► CODING ──► SELF_REVIEWING
 
 **6. READY_FOR_REVIEW** — The bot monitors the PR for your response:
 - **You comment** — moves to ADDRESSING_FEEDBACK
+- **Any org member requests changes** — moves to ADDRESSING_FEEDBACK
 - **You approve** — moves to SQUASHING
+- **You 👍 the bot's review comment** — re-enters SELF_REVIEWING (use this to retry fixes)
 - **Neither** — stays here
 
-**7. ADDRESSING_FEEDBACK** — The bot processes feedback from you and other org members, makes changes, squashes, force-pushes, replies to each review comment explaining what changed, reacts 👍 on each processed comment, and re-requests review from all reviewers who gave feedback.
+**7. ADDRESSING_FEEDBACK** — The bot processes feedback from you and other org members (verified via org membership), makes changes, verifies that code was actually changed (retries up to 3 times if not), squashes, rebases on upstream, force-pushes, replies to each review comment explaining what changed, reacts 👍 on each processed comment, and re-requests review from all reviewers who gave feedback.
 
 **8. SQUASHING** — The bot squashes all commits into a single clean commit.
 
@@ -304,7 +307,9 @@ NEW ──► AWAITING_APPROVAL ──► CODING ──► SELF_REVIEWING
 
 **10. FIXING_CI** — The bot investigates CI failures, fixes them, pushes, and re-requests your review. Up to 3 attempts. If it can't fix CI after 3 tries, it posts a comment and gives up.
 
-**11. DONE** — CI is green or you merged the PR. The entry stays in state for the summary email, then gets pruned after `LOOKBACK_DAYS`.
+**11. DONE** — CI is green or the bot gave up. The worker continues checking if the PR was merged.
+
+**12. MERGED** — The PR has been merged. The entry stays visible in the dashboard and gets pruned after `LOOKBACK_DAYS`.
 
 ## Review workflow
 
