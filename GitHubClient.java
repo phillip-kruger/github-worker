@@ -966,9 +966,9 @@ public class GitHubClient {
 
         removeWorktree(mainDir, wtDir);
 
-        // Delete stale PR branch and fetch fresh
+        // Delete stale PR branch and fetch fresh from upstream (PR refs are on upstream, not the bot's fork)
         git(Actor.USER, mainDir, "branch", "-D", "pr-" + prNumber);
-        git(Actor.USER, mainDir, "fetch", "origin", "pull/" + prNumber + "/head:pr-" + prNumber);
+        git(Actor.USER, mainDir, "fetch", "upstream", "pull/" + prNumber + "/head:pr-" + prNumber);
 
         java.nio.file.Files.createDirectories(wtDir.getParent());
         String result = git(Actor.USER, mainDir,
