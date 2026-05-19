@@ -636,12 +636,41 @@ public class IssueWorkflow {
                 return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
             }
 
+            // Verify changes were actually made
+            String diffCheck = gh.git(GitHubClient.Actor.BOT, repoDir, "diff", "--stat");
+            String statusCheck = gh.git(GitHubClient.Actor.BOT, repoDir, "status", "--porcelain");
+            boolean hasChanges = (diffCheck != null && !diffCheck.isEmpty())
+                    || (statusCheck != null && !statusCheck.isEmpty());
+
+            if (!hasChanges) {
+                // Check if the squash commit differs from the previous push
+                String commitDiff = gh.git(GitHubClient.Actor.BOT, repoDir,
+                        "diff", "origin/fix/" + issueNumber + "...HEAD", "--stat");
+                hasChanges = commitDiff != null && !commitDiff.isEmpty();
+            }
+
+            if (!hasChanges) {
+                entry.attempts++;
+                System.out.println("  No code changes detected after addressing feedback (attempt "
+                        + entry.attempts + "/3). Claude may not have applied the fix.");
+                if (entry.attempts >= 3) {
+                    gh.postComment(ownerRepo, entry.prNumber,
+                            "I've attempted to address the feedback " + entry.attempts
+                                    + " times but couldn't apply the code changes. @" + config.githubUser
+                                    + " please fix manually.");
+                    entry.feedbackText = null;
+                    entry.lastUpdated = Instant.now();
+                    return WorkflowState.IssueState.READY_FOR_REVIEW;
+                }
+                return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
+            }
+
             if (!gh.pushForceLease(ownerRepo, issueNumber, repoDir)) {
                 System.out.println("  Push failed, will retry.");
                 return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
             }
 
-            // Reply to all review comments using full Claude with codebase access
+            // Reply to review comments AFTER push so replies reflect the actual changes
             System.out.println("  Generating replies to review comments...");
             List<JsonNode> toReply = gh.getUnrepliedReviewComments(ownerRepo, entry.prNumber);
             if (!toReply.isEmpty()) {
