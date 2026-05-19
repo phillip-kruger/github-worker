@@ -174,6 +174,45 @@ public class GitHubWorker implements Callable<Integer> {
             state.reviews.put(key, entry);
         }
 
+        // 2b. Promote discovered items that have 👀 reaction to tracked issues/reviews
+        if (!state.discoveries.isEmpty()) {
+            var toPromote = new java.util.ArrayList<String>();
+            for (var entry : state.discoveries.entrySet()) {
+                String key = entry.getKey();
+                var d = entry.getValue();
+                if (state.issues.containsKey(key) || state.reviews.containsKey(key)) continue;
+                if (!gh.wasEyesReactedByUser(d.ownerRepo, d.number)) continue;
+
+                System.out.println("  Promoting discovered item with 👀: " + key);
+                toPromote.add(key);
+
+                if ("pr".equals(d.type)) {
+                    WorkflowState.ReviewEntry re = new WorkflowState.ReviewEntry();
+                    re.title = d.title;
+                    re.ownerRepo = d.ownerRepo;
+                    re.prNumber = d.number;
+                    JsonNode extras = gh.fetchPRExtras(d.ownerRepo, d.number);
+                    if (extras != null) {
+                        re.headBranch = extras.path("headRefName").asText("");
+                        re.author = extras.path("author").path("login").asText("");
+                    }
+                    state.reviews.put(key, re);
+                } else {
+                    WorkflowState.IssueEntry ie = new WorkflowState.IssueEntry();
+                    ie.title = d.title;
+                    ie.ownerRepo = d.ownerRepo;
+                    ie.issueNumber = d.number;
+                    state.issues.put(key, ie);
+                }
+            }
+            for (String key : toPromote) {
+                state.discoveries.remove(key);
+            }
+            if (!toPromote.isEmpty()) {
+                System.out.println("  Promoted " + toPromote.size() + " discovered item(s) to tracking.");
+            }
+        }
+
         if (preview) {
             System.out.println("\nTracked issues:");
             for (var e : state.issues.entrySet()) {
