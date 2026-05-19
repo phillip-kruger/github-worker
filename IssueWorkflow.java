@@ -449,23 +449,18 @@ public class IssueWorkflow {
 
             // Verify the review findings were actually fixed
             System.out.println("  Verifying review fixes...");
-            String reviewDiff = gh.git(GitHubClient.Actor.BOT, repoDir,
-                    "diff", "upstream/" + defaultBranch + "...HEAD");
-            if (reviewDiff == null) reviewDiff = "";
-            if (reviewDiff.length() > 15000) reviewDiff = reviewDiff.substring(0, 15000) + "\n... (truncated)";
-
             String reviewFeedback = entry.feedbackText != null ? entry.feedbackText : "";
             String verifyPrompt = """
                     You are verifying that self-review findings were properly fixed.
+                    You have full access to the codebase — read the actual files to check.
 
                     The review found these issues:
                     %s
 
-                    The current code changes (diff):
-                    %s
-
-                    For EACH issue in the review, check if it was actually fixed in the code.
-                    Do NOT accept acknowledgements — look for concrete code changes.
+                    Instructions:
+                    1. Read the actual source files mentioned in the review (do NOT rely on git diff alone)
+                    2. For EACH issue, check if the code change was made
+                    3. Only mark as unfixed if the specific code change is genuinely missing
 
                     Respond with a JSON object:
                     {
@@ -474,7 +469,7 @@ public class IssueWorkflow {
                     }
 
                     Output ONLY the JSON.
-                    """.formatted(reviewFeedback, reviewDiff);
+                    """.formatted(reviewFeedback);
 
             String verifyResult = claude.run(verifyPrompt, repoDir, 5);
             boolean allFixed = true;
@@ -694,22 +689,18 @@ public class IssueWorkflow {
 
             // Verify the feedback was actually addressed by running a verification pass
             System.out.println("  Verifying feedback was addressed...");
-            String newDiff = gh.git(GitHubClient.Actor.BOT, repoDir,
-                    "diff", "upstream/" + defaultBranch + "...HEAD");
-            if (newDiff == null) newDiff = "";
-            if (newDiff.length() > 15000) newDiff = newDiff.substring(0, 15000) + "\n... (truncated)";
 
             String verifyPrompt = """
                     You are verifying that reviewer feedback was properly addressed in a pull request.
+                    You have full access to the codebase — read the actual files to check.
 
                     The reviewer feedback was:
                     %s
 
-                    The current code changes (diff):
-                    %s
-
-                    For EACH feedback point, determine if it was actually fixed in the code.
-                    Do NOT accept vague or partial fixes. Check the actual diff for concrete changes.
+                    Instructions:
+                    1. Read the actual source files mentioned in the feedback (do NOT rely on git diff alone)
+                    2. For EACH feedback point, check if the code change was made
+                    3. Only mark as unaddressed if the specific code change is genuinely missing
 
                     Respond with a JSON object:
                     {
@@ -718,7 +709,7 @@ public class IssueWorkflow {
                     }
 
                     Output ONLY the JSON, nothing else.
-                    """.formatted(allFeedback, newDiff);
+                    """.formatted(allFeedback);
 
             String verifyResult = claude.run(verifyPrompt, repoDir, 5);
             boolean allAddressed = true;
@@ -756,7 +747,18 @@ public class IssueWorkflow {
                                     + " times but the verifier still finds unaddressed points:\n\n"
                                     + unaddressedPoints + "\n@" + config.githubUser
                                     + " please fix manually.");
+                    // Mark all comments as processed so we don't re-enter this loop
+                    for (JsonNode c : comments) {
+                        long commentId = c.path("id").asLong();
+                        String type = c.path("type").asText("issue");
+                        if ("review".equals(type)) {
+                            gh.reactToPRComment(ownerRepo, commentId);
+                        } else if ("issue".equals(type)) {
+                            gh.addReaction(ownerRepo, commentId, "+1");
+                        }
+                    }
                     entry.feedbackText = null;
+                    entry.attempts = 0;
                     entry.lastUpdated = Instant.now();
                     return WorkflowState.IssueState.READY_FOR_REVIEW;
                 }
