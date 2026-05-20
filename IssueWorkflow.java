@@ -647,44 +647,90 @@ public class IssueWorkflow {
                 allFeedback.append(c.path("body").asText("")).append("\n\n");
             }
 
-            String diff = gh.git(GitHubClient.Actor.BOT, repoDir,
-                    "diff", "upstream/" + defaultBranch + "...HEAD");
-            if (diff == null) diff = "";
-            if (diff.length() > 15000) diff = diff.substring(0, 15000) + "\n... (truncated)";
+            // Step 1: Extract specific edit instructions from feedback
+            System.out.println("  Extracting edit instructions from feedback...");
+            String extractPrompt = """
+                    Extract specific file edit instructions from this reviewer feedback.
 
-            String prompt = """
-                    You are working on a pull request that has received reviewer feedback.
-                    You MUST fix EVERY issue raised. Do not just acknowledge — actually change the code.
-
-                    Current changes (diff against %s):
+                    Feedback:
                     %s
 
-                    Reviewer feedback (fix ALL of these):
+                    For each change requested, output a JSON array of edits:
+                    [
+                      {
+                        "file": "path/to/file.java",
+                        "find": "exact string to find in the file",
+                        "replace": "exact string to replace it with",
+                        "explanation": "what this change does"
+                      }
+                    ]
 
-                    %s
+                    Rules:
+                    - The "find" string must be an EXACT substring from the current file
+                    - The "replace" string is what it should be changed to
+                    - Include enough context in "find" to be unique (a full line or more)
+                    - Output ONLY the JSON array
+                    """.formatted(allFeedback);
 
-                    Instructions:
-                    1. FIRST read CLAUDE.md, CONTRIBUTING.md, or similar guides in the repo root
-                    2. Go through EACH feedback point and make the necessary code changes
-                    3. If a reviewer says assertions are weak, make them stronger with concrete checks
-                    4. If a reviewer points out a bug, fix the bug
-                    5. If a reviewer suggests a refactor, do the refactor
-                    6. Build and run tests to verify your changes work
-                    7. Squash everything into a single commit:
-                       git reset --soft $(git merge-base HEAD upstream/%s) && git commit -m "your message"
+            String editsJson = claude.runBare(extractPrompt);
+            boolean appliedEdits = false;
 
-                    Commit message rules:
-                    - Write a clear, natural-language sentence starting with an uppercase letter
-                    - Do NOT prefix with feat:, fix:, chore:, or any Conventional Commits type
-                    - Keep it concise but descriptive, do not end with a period
-                    - Do NOT add Co-Authored-By trailers
-                    """.formatted(defaultBranch, diff, allFeedback, defaultBranch);
+            if (editsJson != null) {
+                try {
+                    int start = editsJson.indexOf('[');
+                    int end = editsJson.lastIndexOf(']') + 1;
+                    if (start >= 0 && end > start) {
+                        var editMapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                        var edits = editMapper.readTree(editsJson.substring(start, end));
 
-            System.out.println("  Addressing " + comments.size() + " comment(s)...");
-            String result = claude.run(prompt, repoDir);
-            if (result == null) {
-                System.out.println("  Failed to address feedback, will retry.");
-                return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
+                        for (var edit : edits) {
+                            String filePath = edit.path("file").asText("");
+                            String find = edit.path("find").asText("");
+                            String replace = edit.path("replace").asText("");
+                            String explanation = edit.path("explanation").asText("");
+
+                            if (filePath.isEmpty() || find.isEmpty() || find.equals(replace)) continue;
+
+                            java.nio.file.Path targetFile = repoDir.resolve(filePath);
+                            if (!java.nio.file.Files.exists(targetFile)) {
+                                System.out.println("    File not found: " + filePath);
+                                continue;
+                            }
+
+                            String content = java.nio.file.Files.readString(targetFile);
+                            if (content.contains(find)) {
+                                content = content.replace(find, replace);
+                                java.nio.file.Files.writeString(targetFile, content);
+                                System.out.println("    Fixed: " + filePath + " — " + explanation);
+                                appliedEdits = true;
+                            } else {
+                                System.out.println("    Find string not found in " + filePath + ": " + truncate(find, 80));
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println("  Failed to parse edit instructions: " + e.getMessage());
+                }
+            }
+
+            // Step 2: If extraction didn't work, fall back to full Claude run
+            if (!appliedEdits) {
+                System.out.println("  Edit extraction failed, falling back to full Claude run...");
+                String fallbackPrompt = """
+                        Fix this reviewer feedback. Open the specific files mentioned and make the changes.
+                        Do NOT read CLAUDE.md. Do NOT explore. Just edit the files.
+
+                        %s
+
+                        After fixing, run: git add -A && git reset --soft $(git merge-base HEAD upstream/%s) && git commit -m "Address reviewer feedback"
+                        """.formatted(allFeedback, defaultBranch);
+                claude.run(fallbackPrompt, repoDir);
+            } else {
+                // Commit the applied edits
+                gh.git(GitHubClient.Actor.BOT, repoDir, "add", "-A");
+                gh.git(GitHubClient.Actor.BOT, repoDir, "reset", "--soft",
+                        "upstream/" + defaultBranch);
+                gh.git(GitHubClient.Actor.BOT, repoDir, "commit", "-m", "Address reviewer feedback");
             }
 
             // Verify the feedback was actually addressed by running a verification pass
