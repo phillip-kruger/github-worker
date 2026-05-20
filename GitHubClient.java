@@ -1033,7 +1033,14 @@ public class GitHubClient {
         String defaultBranch = getDefaultBranch(ownerRepo);
         String branch = "fix/" + issueNumber;
 
-        // Always rebase on fresh upstream before pushing to avoid stale changes
+        // Ensure all changes are committed before rebasing
+        git(Actor.BOT, repoDir, "add", "-A");
+        String status = git(Actor.BOT, repoDir, "status", "--porcelain");
+        if (status != null && !status.isEmpty()) {
+            git(Actor.BOT, repoDir, "commit", "-m", "WIP: stage changes before rebase");
+        }
+
+        // Fetch upstream and rebase to keep our commits on top
         git(Actor.BOT, repoDir, "fetch", "upstream", defaultBranch);
         git(Actor.BOT, repoDir, "rebase", "upstream/" + defaultBranch);
 
