@@ -943,10 +943,13 @@ public class GitHubClient {
         Path m2Dir = worktreeM2(ownerRepo, number);
         java.nio.file.Files.createDirectories(m2Dir);
 
-        Path mvnDir = wtDir.resolve(".mvn");
-        java.nio.file.Files.createDirectories(mvnDir);
-        java.nio.file.Files.writeString(mvnDir.resolve("maven.config"),
-                "-Dmaven.repo.local=" + m2Dir.toAbsolutePath() + "\n");
+        Path mvnConfig = wtDir.resolve(".mvn").resolve("maven.config");
+        String existing = java.nio.file.Files.exists(mvnConfig)
+                ? java.nio.file.Files.readString(mvnConfig) : "";
+        if (!existing.contains("-Dmaven.repo.local=")) {
+            java.nio.file.Files.writeString(mvnConfig,
+                    existing.stripTrailing() + "\n-Dmaven.repo.local=" + m2Dir.toAbsolutePath() + "\n");
+        }
     }
 
     Path cloneForIssue(String ownerRepo, int issueNumber) throws IOException {
@@ -1032,6 +1035,10 @@ public class GitHubClient {
     boolean pushForceLease(String ownerRepo, int issueNumber, Path repoDir) {
         String defaultBranch = getDefaultBranch(ownerRepo);
         String branch = "fix/" + issueNumber;
+        String repo = ownerRepo.split("/")[1];
+
+        // Restore .mvn/maven.config to upstream version (our isolation overwrites it)
+        git(Actor.BOT, repoDir, "checkout", "HEAD", "--", ".mvn/maven.config");
 
         // Ensure all changes are committed before rebasing
         git(Actor.BOT, repoDir, "add", "-A");
@@ -1040,9 +1047,26 @@ public class GitHubClient {
             git(Actor.BOT, repoDir, "commit", "-m", "WIP: stage changes before rebase");
         }
 
-        // Fetch upstream and rebase to keep our commits on top
+        // Sync fork's default branch with upstream via API so workflow file
+        // changes don't cause "refusing to allow PAT to create/update workflow" errors
+        String forkRepo = config.botUser + "/" + repo;
+        ghText(Actor.BOT, "api", "repos/" + forkRepo + "/merge-upstream",
+                "-X", "POST", "-f", "branch=" + defaultBranch);
+
         git(Actor.BOT, repoDir, "fetch", "upstream", defaultBranch);
-        git(Actor.BOT, repoDir, "rebase", "upstream/" + defaultBranch);
+        git(Actor.BOT, repoDir, "fetch", "origin", defaultBranch);
+
+        // Force-clean working tree — git add -A can miss file mode changes and submodules
+        String dirty = git(Actor.BOT, repoDir, "status", "--porcelain");
+        if (dirty != null && !dirty.isEmpty()) {
+            git(Actor.BOT, repoDir, "stash", "--include-untracked");
+        }
+
+        String rebaseResult = git(Actor.BOT, repoDir, "rebase", "upstream/" + defaultBranch);
+        if (rebaseResult == null) {
+            git(Actor.BOT, repoDir, "rebase", "--abort");
+            System.err.println("  Rebase failed, pushing without rebase.");
+        }
 
         String result = git(Actor.BOT, repoDir, "push", "--force-with-lease", "-u", "origin", branch);
         return result != null;
