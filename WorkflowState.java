@@ -21,11 +21,11 @@ public class WorkflowState {
     enum IssueState {
         NEW, AWAITING_APPROVAL, CODING, SELF_REVIEWING, FIXING_REVIEW,
         READY_FOR_REVIEW, ADDRESSING_FEEDBACK, SQUASHING, MONITORING_CI,
-        FIXING_CI, DONE, MERGED
+        FIXING_CI, DONE, MERGED, CLOSED
     }
 
     enum ReviewState {
-        NEW, REVIEW_POSTED, DONE
+        NEW, REVIEW_POSTED, DONE, MERGED, CLOSED
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

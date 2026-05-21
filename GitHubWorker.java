@@ -272,11 +272,49 @@ public class GitHubWorker implements Callable<Integer> {
             return 0;
         }
 
+        // 2b. Check for externally closed/merged issues and reviews
+        for (var entry : state.issues.entrySet()) {
+            WorkflowState.IssueEntry issue = entry.getValue();
+            if (issue.state == WorkflowState.IssueState.MERGED
+                    || issue.state == WorkflowState.IssueState.CLOSED) continue;
+            String ghState = ghClient.getIssueOrPRState(issue.ownerRepo, issue.issueNumber, issue.prNumber);
+            if ("MERGED".equals(ghState) && issue.state != WorkflowState.IssueState.MERGED) {
+                System.out.println("  " + entry.getKey() + " was merged externally.");
+                issue.state = WorkflowState.IssueState.MERGED;
+                issue.lastUpdated = java.time.Instant.now();
+                saveState(state);
+            } else if ("CLOSED".equals(ghState)) {
+                System.out.println("  " + entry.getKey() + " was closed externally.");
+                issue.state = WorkflowState.IssueState.CLOSED;
+                issue.lastUpdated = java.time.Instant.now();
+                saveState(state);
+            }
+        }
+        for (var entry : state.reviews.entrySet()) {
+            WorkflowState.ReviewEntry review = entry.getValue();
+            if (review.state == WorkflowState.ReviewState.DONE
+                    || review.state == WorkflowState.ReviewState.MERGED
+                    || review.state == WorkflowState.ReviewState.CLOSED) continue;
+            String ghState = ghClient.getPRState(review.ownerRepo, review.prNumber);
+            if ("MERGED".equals(ghState)) {
+                System.out.println("  " + entry.getKey() + " was merged.");
+                review.state = WorkflowState.ReviewState.MERGED;
+                review.lastUpdated = java.time.Instant.now();
+                saveState(state);
+            } else if ("CLOSED".equals(ghState)) {
+                System.out.println("  " + entry.getKey() + " was closed.");
+                review.state = WorkflowState.ReviewState.CLOSED;
+                review.lastUpdated = java.time.Instant.now();
+                saveState(state);
+            }
+        }
+
         // 3. Advance tracked issues
         for (var entry : state.issues.entrySet()) {
             String key = entry.getKey();
             WorkflowState.IssueEntry issue = entry.getValue();
-            if (issue.state == WorkflowState.IssueState.MERGED) continue;
+            if (issue.state == WorkflowState.IssueState.MERGED
+                    || issue.state == WorkflowState.IssueState.CLOSED) continue;
 
             WorkflowState.IssueState before = issue.state;
             try {
@@ -303,7 +341,9 @@ public class GitHubWorker implements Callable<Integer> {
             for (var entry : state.reviews.entrySet()) {
                 String key = entry.getKey();
                 WorkflowState.ReviewEntry review = entry.getValue();
-                if (review.state == WorkflowState.ReviewState.DONE) continue;
+                if (review.state == WorkflowState.ReviewState.DONE
+                        || review.state == WorkflowState.ReviewState.MERGED
+                        || review.state == WorkflowState.ReviewState.CLOSED) continue;
 
                 WorkflowState.ReviewState before = review.state;
                 try {

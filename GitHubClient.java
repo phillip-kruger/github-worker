@@ -498,6 +498,40 @@ public class GitHubClient {
                 "--json", "title,body,comments,labels,assignees");
     }
 
+    String getIssueOrPRState(String ownerRepo, int issueNumber, Integer prNumber) {
+        if (prNumber != null && prNumber > 0) {
+            return getPRState(ownerRepo, prNumber);
+        }
+        JsonNode issue = ghJson(Actor.USER,
+                "issue", "view", String.valueOf(issueNumber),
+                "--repo", ownerRepo,
+                "--json", "state");
+        if (issue == null) return "OPEN";
+        String s = issue.path("state").asText("OPEN");
+        return "CLOSED".equalsIgnoreCase(s) ? "CLOSED" : "OPEN";
+    }
+
+    String getPRState(String ownerRepo, int prNumber) {
+        JsonNode pr = ghJson(Actor.USER,
+                "pr", "view", String.valueOf(prNumber),
+                "--repo", ownerRepo,
+                "--json", "state");
+        if (pr == null) return "OPEN";
+        String s = pr.path("state").asText("OPEN");
+        if ("MERGED".equalsIgnoreCase(s)) return "MERGED";
+        if ("CLOSED".equalsIgnoreCase(s)) return "CLOSED";
+        return "OPEN";
+    }
+
+    boolean hasMergeConflicts(String ownerRepo, int prNumber) {
+        JsonNode pr = ghJson(Actor.USER,
+                "pr", "view", String.valueOf(prNumber),
+                "--repo", ownerRepo,
+                "--json", "mergeable");
+        if (pr == null) return false;
+        return "CONFLICTING".equalsIgnoreCase(pr.path("mergeable").asText(""));
+    }
+
     JsonNode getPRDetails(String ownerRepo, int number) {
         return ghJson(Actor.USER,
                 "pr", "view", String.valueOf(number),
@@ -535,6 +569,17 @@ public class GitHubClient {
 
     boolean hasThumbsDownFromUser(String ownerRepo, long commentId) {
         return hasReactionFromUser(ownerRepo, commentId, "-1");
+    }
+
+    void minimizeComment(String ownerRepo, long commentId) {
+        String nodeId = ghText(Actor.BOT,
+                "api", "repos/" + ownerRepo + "/issues/comments/" + commentId,
+                "--jq", ".node_id");
+        if (nodeId == null || nodeId.isEmpty()) return;
+        nodeId = nodeId.replace("\"", "").trim();
+        String mutation = "mutation { minimizeComment(input: {subjectId: \""
+                + nodeId + "\", classifier: OUTDATED}) { minimizedComment { isMinimized } } }";
+        ghText(Actor.BOT, "api", "graphql", "-f", "query=" + mutation);
     }
 
     private boolean hasReactionFromUser(String ownerRepo, long commentId, String content) {
@@ -949,6 +994,8 @@ public class GitHubClient {
         if (!existing.contains("-Dmaven.repo.local=")) {
             java.nio.file.Files.writeString(mvnConfig,
                     existing.stripTrailing() + "\n-Dmaven.repo.local=" + m2Dir.toAbsolutePath() + "\n");
+            // Tell git to ignore this change so it never leaks into commits
+            git(Actor.BOT, wtDir, "update-index", "--assume-unchanged", ".mvn/maven.config");
         }
     }
 
@@ -965,10 +1012,14 @@ public class GitHubClient {
         // Delete stale branch from a previous attempt if it exists
         git(Actor.BOT, mainDir, "branch", "-D", branch);
 
+        // Base on origin/main (the fork) so push only sends our commits.
+        // Basing on upstream/main would require pushing upstream commits the fork
+        // doesn't have, which fails if any touch .github/workflows/ (needs workflow PAT scope).
+        git(Actor.BOT, mainDir, "fetch", "origin", defaultBranch);
         java.nio.file.Files.createDirectories(wtDir.getParent());
         String result = git(Actor.BOT, mainDir,
                 "worktree", "add", wtDir.toAbsolutePath().toString(),
-                "-b", branch, "upstream/" + defaultBranch);
+                "-b", branch, "origin/" + defaultBranch);
         if (result == null) return null;
 
         disableGPGSigning(wtDir);
@@ -986,17 +1037,16 @@ public class GitHubClient {
         String branch = "fix/" + issueNumber;
         String defaultBranch = getDefaultBranch(ownerRepo);
 
-        git(Actor.BOT, mainDir, "fetch", "upstream", defaultBranch);
+        git(Actor.BOT, mainDir, "fetch", "origin", defaultBranch);
         git(Actor.BOT, mainDir, "fetch", "origin", branch);
 
+        // Always reset local branch to origin's version to avoid stale state
+        // from previous runs (e.g. squashed commits that include upstream changes)
         java.nio.file.Files.createDirectories(wtDir.getParent());
         String result = git(Actor.BOT, mainDir,
-                "worktree", "add", wtDir.toAbsolutePath().toString(), branch);
+                "worktree", "add", wtDir.toAbsolutePath().toString(),
+                "-B", branch, "origin/" + branch);
         if (result == null) {
-            result = git(Actor.BOT, mainDir,
-                    "worktree", "add", wtDir.toAbsolutePath().toString(),
-                    "-B", branch, "origin/" + branch);
-            if (result == null) return null;
         }
 
         disableGPGSigning(wtDir);
@@ -1033,41 +1083,17 @@ public class GitHubClient {
     }
 
     boolean pushForceLease(String ownerRepo, int issueNumber, Path repoDir) {
-        String defaultBranch = getDefaultBranch(ownerRepo);
         String branch = "fix/" + issueNumber;
-        String repo = ownerRepo.split("/")[1];
 
-        // Restore .mvn/maven.config to upstream version (our isolation overwrites it)
-        git(Actor.BOT, repoDir, "checkout", "HEAD", "--", ".mvn/maven.config");
-
-        // Ensure all changes are committed before rebasing
         git(Actor.BOT, repoDir, "add", "-A");
         String status = git(Actor.BOT, repoDir, "status", "--porcelain");
         if (status != null && !status.isEmpty()) {
-            git(Actor.BOT, repoDir, "commit", "-m", "WIP: stage changes before rebase");
+            git(Actor.BOT, repoDir, "commit", "-m", "WIP: stage changes before push");
         }
 
-        // Sync fork's default branch with upstream via API so workflow file
-        // changes don't cause "refusing to allow PAT to create/update workflow" errors
-        String forkRepo = config.botUser + "/" + repo;
-        ghText(Actor.BOT, "api", "repos/" + forkRepo + "/merge-upstream",
-                "-X", "POST", "-f", "branch=" + defaultBranch);
-
-        git(Actor.BOT, repoDir, "fetch", "upstream", defaultBranch);
-        git(Actor.BOT, repoDir, "fetch", "origin", defaultBranch);
-
-        // Force-clean working tree — git add -A can miss file mode changes and submodules
-        String dirty = git(Actor.BOT, repoDir, "status", "--porcelain");
-        if (dirty != null && !dirty.isEmpty()) {
-            git(Actor.BOT, repoDir, "stash", "--include-untracked");
-        }
-
-        String rebaseResult = git(Actor.BOT, repoDir, "rebase", "upstream/" + defaultBranch);
-        if (rebaseResult == null) {
-            git(Actor.BOT, repoDir, "rebase", "--abort");
-            System.err.println("  Rebase failed, pushing without rebase.");
-        }
-
+        // No rebase — branch is based on origin/main so push only sends our commits.
+        // Rebasing on upstream/main would pull in upstream commits the fork doesn't have,
+        // which fails if any touch .github/workflows/ (needs workflow PAT scope).
         String result = git(Actor.BOT, repoDir, "push", "--force-with-lease", "-u", "origin", branch);
         return result != null;
     }

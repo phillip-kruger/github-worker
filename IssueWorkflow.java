@@ -342,20 +342,13 @@ public class IssueWorkflow {
             }
 
             String reviewPrompt = """
-                    Review the changes on the current branch compared to the default branch.
-                    Run `git diff upstream/%s...HEAD` to see all changes.
+                    Review the changes on the current branch.
+                    Run `git diff origin/%s...HEAD` to see all changes.
 
-                    Check for:
-                    1. Correctness: Does the fix actually address the issue?
-                    2. Tests: Are there adequate tests? Are existing tests passing?
-                    3. Documentation: Are docs/javadoc updated where needed?
-                    4. Security: Any security implications?
-                    5. Maintainability: Is the code clean, well-structured, follows existing patterns?
-                    6. Quarkus patterns: Does it follow Quarkus conventions? Check CLAUDE.md for guidance.
-                    7. Skills: If this repo uses Quarkus skills, are they updated if needed?
-
-                    For each issue found, describe it clearly.
+                    Check correctness, tests, security, and that it follows existing patterns.
                     If everything looks good, respond with exactly: "No issues found."
+                    Otherwise, list each issue as a short bullet (one sentence each).
+                    Write like a human teammate — no markdown headers, no emoji, no verbose analysis.
                     Do NOT make any changes — only review.
                     """.formatted(defaultBranch);
 
@@ -371,6 +364,9 @@ public class IssueWorkflow {
 
             if (reviewOutput.toLowerCase().contains("no issues found")) {
                 System.out.println("  Self-review passed, moving to ready for review.");
+                Long passedId = gh.postComment(ownerRepo, entry.prNumber,
+                        "Self-review complete — no issues found.");
+                if (passedId != null) gh.minimizeComment(ownerRepo, passedId);
                 gh.addReviewer(ownerRepo, entry.prNumber, config.githubUser);
                 gh.markPRReady(ownerRepo, entry.prNumber);
                 return WorkflowState.IssueState.READY_FOR_REVIEW;
@@ -430,7 +426,7 @@ public class IssueWorkflow {
                     4. Verify your changes by reading the modified files
                     5. Build and run tests to confirm the fix works
                     6. Squash everything into a single commit:
-                       git reset --soft $(git merge-base HEAD upstream/%s) && git commit -m "your message"
+                       git reset --soft $(git merge-base HEAD origin/%s) && git commit -m "your message"
 
                     Commit message rules:
                     - Write a clear, natural-language sentence starting with an uppercase letter
@@ -523,6 +519,11 @@ public class IssueWorkflow {
                 return WorkflowState.IssueState.FIXING_REVIEW;
             }
 
+            // Hide the self-review comment as outdated now that issues are fixed
+            if (entry.botCommentId != null) {
+                gh.minimizeComment(ownerRepo, entry.botCommentId);
+            }
+
             gh.addReviewer(ownerRepo, entry.prNumber, config.githubUser);
             gh.markPRReady(ownerRepo, entry.prNumber);
 
@@ -550,6 +551,32 @@ public class IssueWorkflow {
         if (entry.prNumber == null || entry.prNumber == 0) {
             System.out.println("  No PR number, cannot check reviews.");
             return WorkflowState.IssueState.READY_FOR_REVIEW;
+        }
+
+        // Check for merge conflicts and resolve by rebasing
+        if (gh.hasMergeConflicts(ownerRepo, entry.prNumber)) {
+            System.out.println("  PR has merge conflicts, rebasing...");
+            try {
+                Path repoDir = gh.cloneForExistingPR(ownerRepo, issueNumber);
+                if (repoDir != null) {
+                    String defaultBranch = gh.getDefaultBranch(ownerRepo);
+                    gh.git(GitHubClient.Actor.BOT, repoDir, "fetch", "upstream", defaultBranch);
+                    String result = gh.git(GitHubClient.Actor.BOT, repoDir, "rebase", "upstream/" + defaultBranch);
+                    if (result == null) {
+                        // Rebase hit conflicts — try to resolve them
+                        result = resolveConflictsAndContinueRebase(repoDir);
+                    }
+                    if (result != null) {
+                        gh.git(GitHubClient.Actor.BOT, repoDir, "push", "--force-with-lease", "-u", "origin", "fix/" + issueNumber);
+                        System.out.println("  Conflicts resolved, rebased and pushed.");
+                    } else {
+                        gh.git(GitHubClient.Actor.BOT, repoDir, "rebase", "--abort");
+                        System.out.println("  Could not resolve conflicts automatically.");
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println("  Error resolving conflicts: " + e.getMessage());
+            }
         }
 
         GitHubClient.ReviewVerdict verdict = gh.getUserReviewVerdict(ownerRepo, entry.prNumber);
@@ -636,15 +663,28 @@ public class IssueWorkflow {
                 return WorkflowState.IssueState.ADDRESSING_FEEDBACK;
             }
 
+            // Only include line-level comments (with file path) — broad review bodies
+            // overwhelm Claude and cause it to conclude "already implemented"
             StringBuilder allFeedback = new StringBuilder();
+            java.util.Set<String> referencedFiles = new java.util.LinkedHashSet<>();
             for (JsonNode c : comments) {
                 String path = c.path("path").asText("");
+                if (path.isEmpty()) continue;
                 String author = c.path("user").asText("");
-                allFeedback.append("--- Feedback");
-                if (!author.isEmpty()) allFeedback.append(" from @").append(author);
-                if (!path.isEmpty()) allFeedback.append(" on file: ").append(path);
-                allFeedback.append(" ---\n");
+                allFeedback.append("--- ").append(author).append(" on ").append(path).append(" ---\n");
                 allFeedback.append(c.path("body").asText("")).append("\n\n");
+                referencedFiles.add(path);
+            }
+
+            // Read actual file contents for referenced files so Claude has exact strings
+            StringBuilder fileContents = new StringBuilder();
+            for (String path : referencedFiles) {
+                java.nio.file.Path f = repoDir.resolve(path);
+                if (java.nio.file.Files.exists(f)) {
+                    String content = java.nio.file.Files.readString(f);
+                    fileContents.append("=== FILE: ").append(path).append(" ===\n");
+                    fileContents.append(content).append("\n\n");
+                }
             }
 
             // Step 1: Extract specific edit instructions from feedback
@@ -653,6 +693,9 @@ public class IssueWorkflow {
                     Extract specific file edit instructions from this reviewer feedback.
 
                     Feedback:
+                    %s
+
+                    Current file contents:
                     %s
 
                     For each change requested, output a JSON array of edits:
@@ -666,11 +709,12 @@ public class IssueWorkflow {
                     ]
 
                     Rules:
-                    - The "find" string must be an EXACT substring from the current file
+                    - Use the EXACT file paths shown above (e.g. extensions/devui/runtime/...)
+                    - The "find" string must be an EXACT substring copied from the file content above
                     - The "replace" string is what it should be changed to
                     - Include enough context in "find" to be unique (a full line or more)
                     - Output ONLY the JSON array
-                    """.formatted(allFeedback);
+                    """.formatted(allFeedback, fileContents);
 
             String editsJson = claude.runBare(extractPrompt);
             boolean appliedEdits = false;
@@ -719,18 +763,21 @@ public class IssueWorkflow {
                 String fallbackPrompt = """
                         Fix this reviewer feedback. Open the specific files mentioned and make the changes.
                         Do NOT read CLAUDE.md. Do NOT explore. Just edit the files.
+                        Do NOT run git commands — just edit the files.
 
                         %s
-
-                        After fixing, run: git add -A && git reset --soft $(git merge-base HEAD upstream/%s) && git commit -m "Address reviewer feedback"
-                        """.formatted(allFeedback, defaultBranch);
+                        """.formatted(allFeedback);
                 claude.run(fallbackPrompt, repoDir);
-            } else {
-                // Commit the applied edits
-                gh.git(GitHubClient.Actor.BOT, repoDir, "add", "-A");
-                gh.git(GitHubClient.Actor.BOT, repoDir, "reset", "--soft",
-                        "upstream/" + defaultBranch);
+            }
+
+            // We handle the commit — don't rely on Claude to commit
+            gh.git(GitHubClient.Actor.BOT, repoDir, "add", "-A");
+            String diff = gh.git(GitHubClient.Actor.BOT, repoDir, "diff", "--cached", "--stat");
+            if (diff != null && !diff.isEmpty()) {
                 gh.git(GitHubClient.Actor.BOT, repoDir, "commit", "-m", "Address reviewer feedback");
+                System.out.println("  Committed changes: " + diff.lines().count() + " file(s)");
+            } else {
+                System.out.println("  WARNING: No code changes were made by the fix attempt.");
             }
 
             // Verify the feedback was actually addressed by running a verification pass
@@ -834,22 +881,15 @@ public class IssueWorkflow {
                 }
 
                 String replyPrompt = """
-                        You are the author of this pull request. Reviewers left these comments.
-                        Look at the actual code in the repository to understand what was changed.
-                        Run `git diff upstream/%s...HEAD` to see the changes.
+                        You are the author of this PR. Reply to each reviewer comment.
+                        Run `git diff origin/%s...HEAD` to see the changes.
+                        Write 1 sentence per reply — say what you changed or acknowledge the point.
+                        Write like a teammate, not a bot. No markdown headers or emoji.
 
-                        For each comment, write a brief reply (1-2 sentences) explaining how the
-                        current code addresses the feedback. Reference specific code if relevant.
-                        If something wasn't fixed, say so honestly.
-
-                        Reviewer comments:
+                        Comments:
                         %s
 
-                        Respond with a JSON array where each element has:
-                        - "id": the comment id number
-                        - "reply": your reply text
-
-                        Output ONLY the JSON array.
+                        Respond with ONLY a JSON array: [{"id": 123, "reply": "your reply"}]
                         """.formatted(defaultBranch, reviewComments);
 
                 String repliesJson = claude.run(replyPrompt, repoDir, 5);
@@ -933,26 +973,12 @@ public class IssueWorkflow {
                 return WorkflowState.IssueState.SQUASHING;
             }
 
-            // Fetch latest upstream before squashing to avoid stale changes
-            gh.git(GitHubClient.Actor.BOT, repoDir, "fetch", "upstream", defaultBranch);
-
-            // Rebase on upstream to ensure we only have our changes
-            gh.git(GitHubClient.Actor.BOT, repoDir, "rebase", "upstream/" + defaultBranch);
-
-            String commitMsg = gh.git(GitHubClient.Actor.BOT, repoDir, "log", "--format=%s", "-1");
-            if (commitMsg == null || commitMsg.isEmpty()) commitMsg = entry.title;
-
-            gh.git(GitHubClient.Actor.BOT, repoDir,
-                    "reset", "--soft", "upstream/" + defaultBranch);
-            gh.git(GitHubClient.Actor.BOT, repoDir,
-                    "commit", "-m", commitMsg);
-
             if (!gh.pushForceLease(ownerRepo, issueNumber, repoDir)) {
                 System.out.println("  Push failed, will retry.");
                 return WorkflowState.IssueState.SQUASHING;
             }
 
-            System.out.println("  Squashed to single commit.");
+            System.out.println("  Pushed successfully.");
             entry.lastUpdated = Instant.now();
             return WorkflowState.IssueState.MONITORING_CI;
 
@@ -1042,7 +1068,7 @@ public class IssueWorkflow {
                     3. Fix the issues causing the failures
                     4. Build and test locally
                     5. Squash everything into a single commit:
-                       git reset --soft $(git merge-base HEAD upstream/%s) && git commit -m "your message"
+                       git reset --soft $(git merge-base HEAD origin/%s) && git commit -m "your message"
 
                     Commit message rules:
                     - Write a clear, natural-language sentence starting with an uppercase letter
@@ -1113,6 +1139,55 @@ public class IssueWorkflow {
             sb.append(c.path("body").asText("")).append("\n");
         }
         return sb.toString();
+    }
+
+    private String resolveConflictsAndContinueRebase(Path repoDir) {
+        for (int step = 0; step < 20; step++) {
+            String conflicted = gh.git(GitHubClient.Actor.BOT, repoDir, "diff", "--name-only", "--diff-filter=U");
+            if (conflicted == null || conflicted.isEmpty()) {
+                // No more conflicts — continue rebase
+                String cont = gh.git(GitHubClient.Actor.BOT, repoDir, "rebase", "--continue");
+                if (cont != null) return cont;
+                // rebase --continue might hit the next commit's conflicts
+                continue;
+            }
+
+            boolean resolved = false;
+            for (String file : conflicted.split("\n")) {
+                file = file.trim();
+                if (file.isEmpty()) continue;
+                java.nio.file.Path filePath = repoDir.resolve(file);
+                try {
+                    String content = java.nio.file.Files.readString(filePath);
+                    if (!content.contains("<<<<<<<")) continue;
+
+                    String resolvePrompt = """
+                            Resolve this merge conflict. The file has git conflict markers.
+                            Keep the intent of BOTH sides — merge them logically.
+                            Output ONLY the resolved file content, nothing else.
+
+                            File: %s
+                            %s
+                            """.formatted(file, content);
+
+                    String resolvedContent = claude.runBare(resolvePrompt);
+                    if (resolvedContent != null && !resolvedContent.contains("<<<<<<<")) {
+                        java.nio.file.Files.writeString(filePath, resolvedContent);
+                        gh.git(GitHubClient.Actor.BOT, repoDir, "add", file);
+                        System.out.println("    Resolved: " + file);
+                        resolved = true;
+                    }
+                } catch (Exception e) {
+                    System.err.println("    Failed to resolve " + file + ": " + e.getMessage());
+                }
+            }
+            if (!resolved) return null;
+
+            String cont = gh.git(GitHubClient.Actor.BOT, repoDir,
+                    "-c", "core.editor=true", "rebase", "--continue");
+            if (cont != null) return cont;
+        }
+        return null;
     }
 
     private static String truncate(String s, int max) {
