@@ -39,6 +39,7 @@ public class IssueWorkflow {
             case FIXING_CI -> handleFixingCI(entry);
             case DONE -> handleDone(entry);
             case MERGED -> WorkflowState.IssueState.MERGED;
+            case CLOSED -> WorkflowState.IssueState.CLOSED;
         };
     }
 
@@ -149,6 +150,8 @@ public class IssueWorkflow {
             System.out.println("  No bot comment ID recorded, resetting to NEW.");
             return WorkflowState.IssueState.NEW;
         }
+
+        gh.ensureCommentNodeId(ownerRepo, issueNumber, entry.botCommentId);
 
         if (gh.hasThumbsUpFromUser(ownerRepo, entry.botCommentId)) {
             System.out.println("  👍 received — proceeding to coding.");

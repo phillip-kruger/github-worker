@@ -277,7 +277,7 @@ public class GitHubWorker implements Callable<Integer> {
             WorkflowState.IssueEntry issue = entry.getValue();
             if (issue.state == WorkflowState.IssueState.MERGED
                     || issue.state == WorkflowState.IssueState.CLOSED) continue;
-            String ghState = ghClient.getIssueOrPRState(issue.ownerRepo, issue.issueNumber, issue.prNumber);
+            String ghState = gh.getIssueOrPRState(issue.ownerRepo, issue.issueNumber, issue.prNumber);
             if ("MERGED".equals(ghState) && issue.state != WorkflowState.IssueState.MERGED) {
                 System.out.println("  " + entry.getKey() + " was merged externally.");
                 issue.state = WorkflowState.IssueState.MERGED;
@@ -295,7 +295,7 @@ public class GitHubWorker implements Callable<Integer> {
             if (review.state == WorkflowState.ReviewState.DONE
                     || review.state == WorkflowState.ReviewState.MERGED
                     || review.state == WorkflowState.ReviewState.CLOSED) continue;
-            String ghState = ghClient.getPRState(review.ownerRepo, review.prNumber);
+            String ghState = gh.getPRState(review.ownerRepo, review.prNumber);
             if ("MERGED".equals(ghState)) {
                 System.out.println("  " + entry.getKey() + " was merged.");
                 review.state = WorkflowState.ReviewState.MERGED;

@@ -21,6 +21,8 @@ public class ReviewWorkflow {
         return switch (entry.state) {
             case NEW -> handleNew(entry);
             case REVIEW_POSTED, DONE -> WorkflowState.ReviewState.DONE;
+            case MERGED -> WorkflowState.ReviewState.MERGED;
+            case CLOSED -> WorkflowState.ReviewState.CLOSED;
         };
     }
 

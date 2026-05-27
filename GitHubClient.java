@@ -1,6 +1,7 @@
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -19,32 +20,15 @@ public class GitHubClient {
 
     private final Config config;
     private final ObjectMapper mapper = new ObjectMapper();
+    private final Map<String, String> nodeIdCache = new java.util.HashMap<>();
+    private final Map<Long, String> commentNodeIdCache = new java.util.HashMap<>();
+    private final Map<Long, String> reviewThreadIdCache = new java.util.HashMap<>();
 
     GitHubClient(Config config) {
         this.config = config;
     }
 
     // --- Core execution ---
-
-    JsonNode ghJson(Actor actor, String... args) {
-        String output = ghText(actor, args);
-        if (output == null || output.isEmpty()) return null;
-        try {
-            return mapper.readTree(output);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    <T> T ghTyped(Actor actor, TypeReference<T> type, String... args) {
-        String output = ghText(actor, args);
-        if (output == null || output.isEmpty()) return null;
-        try {
-            return mapper.readValue(output, type);
-        } catch (Exception e) {
-            return null;
-        }
-    }
 
     String ghText(Actor actor, String... args) {
         try {
@@ -93,6 +77,166 @@ public class GitHubClient {
         return pb;
     }
 
+    // --- GraphQL infrastructure ---
+
+    JsonNode graphql(Actor actor, String query) {
+        String result = ghText(actor, "api", "graphql", "-f", "query=" + query);
+        if (result == null) return null;
+        try {
+            JsonNode root = mapper.readTree(result);
+            JsonNode errors = root.path("errors");
+            if (errors.isArray() && !errors.isEmpty()) {
+                System.err.println("  GraphQL errors: " + errors);
+            }
+            JsonNode data = root.path("data");
+            return data.isMissingNode() ? null : data;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    JsonNode graphqlWithVars(Actor actor, String query, String... vars) {
+        List<String> args = new ArrayList<>();
+        args.add("api");
+        args.add("graphql");
+        args.add("-f");
+        args.add("query=" + query);
+        for (String var : vars) {
+            args.add("-f");
+            args.add(var);
+        }
+        String result = ghText(actor, args.toArray(new String[0]));
+        if (result == null) return null;
+        try {
+            JsonNode root = mapper.readTree(result);
+            JsonNode errors = root.path("errors");
+            if (errors.isArray() && !errors.isEmpty()) {
+                System.err.println("  GraphQL errors: " + errors);
+            }
+            JsonNode data = root.path("data");
+            return data.isMissingNode() ? null : data;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String[] splitOwnerRepo(String ownerRepo) {
+        String[] parts = ownerRepo.split("/");
+        return new String[]{parts[0], parts[1]};
+    }
+
+    private void cacheNodeId(String key, String nodeId) {
+        if (nodeId != null && !nodeId.isEmpty()) nodeIdCache.put(key, nodeId);
+    }
+
+    private void cacheCommentNodeId(long databaseId, String nodeId) {
+        if (nodeId != null && !nodeId.isEmpty()) commentNodeIdCache.put(databaseId, nodeId);
+    }
+
+    void ensureCommentNodeId(String ownerRepo, int number, long commentDatabaseId) {
+        if (commentNodeIdCache.containsKey(commentDatabaseId)) return;
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    issueOrPullRequest(number: %d) {
+                      ... on Issue {
+                        comments(first: 100) {
+                          nodes { databaseId id }
+                        }
+                      }
+                      ... on PullRequest {
+                        comments(first: 100) {
+                          nodes { databaseId id }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], number));
+        if (data == null) return;
+        JsonNode comments = data.path("repository").path("issueOrPullRequest").path("comments").path("nodes");
+        for (JsonNode c : comments) {
+            cacheCommentNodeId(c.path("databaseId").asLong(), c.path("id").asText(null));
+        }
+    }
+
+    private String getIssueOrPRNodeId(Actor actor, String ownerRepo, int number) {
+        String key = "issueOrPR:" + ownerRepo + "#" + number;
+        String cached = nodeIdCache.get(key);
+        if (cached != null) return cached;
+        cached = nodeIdCache.get("issue:" + ownerRepo + "#" + number);
+        if (cached != null) return cached;
+        cached = nodeIdCache.get("pr:" + ownerRepo + "#" + number);
+        if (cached != null) return cached;
+
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(actor, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    issueOrPullRequest(number: %d) {
+                      ... on Issue { id }
+                      ... on PullRequest { id }
+                    }
+                } }""", parts[0], parts[1], number));
+        if (data == null) return null;
+        String nodeId = data.path("repository").path("issueOrPullRequest").path("id").asText(null);
+        cacheNodeId(key, nodeId);
+        return nodeId;
+    }
+
+    private String getPRNodeId(Actor actor, String ownerRepo, int number) {
+        String key = "pr:" + ownerRepo + "#" + number;
+        String cached = nodeIdCache.get(key);
+        if (cached != null) return cached;
+        cached = nodeIdCache.get("issueOrPR:" + ownerRepo + "#" + number);
+        if (cached != null) return cached;
+
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(actor, String.format("""
+                { repository(owner: "%s", name: "%s") { pullRequest(number: %d) { id } } }
+                """, parts[0], parts[1], number));
+        if (data == null) return null;
+        String nodeId = data.path("repository").path("pullRequest").path("id").asText(null);
+        cacheNodeId(key, nodeId);
+        return nodeId;
+    }
+
+    private String getRepoNodeId(Actor actor, String ownerRepo) {
+        String key = "repo:" + ownerRepo;
+        String cached = nodeIdCache.get(key);
+        if (cached != null) return cached;
+
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(actor, String.format("""
+                { repository(owner: "%s", name: "%s") { id } }
+                """, parts[0], parts[1]));
+        if (data == null) return null;
+        String nodeId = data.path("repository").path("id").asText(null);
+        cacheNodeId(key, nodeId);
+        return nodeId;
+    }
+
+    private String getUserNodeId(Actor actor, String login) {
+        String key = "user:" + login;
+        String cached = nodeIdCache.get(key);
+        if (cached != null) return cached;
+
+        JsonNode data = graphql(actor, String.format("""
+                { user(login: "%s") { id } }""", login));
+        if (data == null) return null;
+        String nodeId = data.path("user").path("id").asText(null);
+        cacheNodeId(key, nodeId);
+        return nodeId;
+    }
+
+    private boolean hasReactionInline(JsonNode node, String userLogin, String reactionContent) {
+        JsonNode reactions = node.path("reactions").path("nodes");
+        for (JsonNode r : reactions) {
+            if (userLogin.equals(r.path("user").path("login").asText(""))
+                    && reactionContent.equals(r.path("content").asText(""))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // --- Git commands with token ---
 
     String git(Actor actor, Path cwd, String... args) {
@@ -127,97 +271,181 @@ public class GitHubClient {
 
     List<JsonNode> fetchAssignedIssues() {
         String since = LocalDate.now().minusDays(config.lookbackDays).format(DateTimeFormatter.ISO_DATE);
-        JsonNode result = ghJson(Actor.USER,
-                "search", "issues",
-                "--assignee", config.githubUser,
-                "--created", ">=" + since,
-                "--state", "open",
-                "--limit", "50",
-                "--json", "repository,title,url,number,createdAt,updatedAt,labels");
-        if (result == null || !result.isArray()) return List.of();
+        String searchQuery = "assignee:" + config.githubUser + " is:open is:issue created:>=" + since;
+
+        JsonNode data = graphqlWithVars(Actor.USER, """
+                query($q: String!) {
+                  search(query: $q, type: ISSUE, first: 50) {
+                    nodes {
+                      ... on Issue {
+                        number title url createdAt updatedAt
+                        repository { nameWithOwner }
+                        labels(first: 20) { nodes { name } }
+                      }
+                    }
+                  }
+                }""", "q=" + searchQuery);
+        if (data == null) return List.of();
+        JsonNode nodes = data.path("search").path("nodes");
+        if (!nodes.isArray()) return List.of();
+
         List<JsonNode> issues = new ArrayList<>();
-        for (JsonNode n : result) {
+        for (JsonNode n : nodes) {
             String org = n.path("repository").path("nameWithOwner").asText("").split("/")[0];
             if (!config.excludeOrgs.contains(org)) {
-                issues.add(n);
+                ObjectNode item = mapper.createObjectNode();
+                item.put("number", n.path("number").asInt());
+                item.put("title", n.path("title").asText(""));
+                item.put("url", n.path("url").asText(""));
+                item.put("createdAt", n.path("createdAt").asText(""));
+                item.put("updatedAt", n.path("updatedAt").asText(""));
+                ObjectNode repo = mapper.createObjectNode();
+                repo.put("nameWithOwner", n.path("repository").path("nameWithOwner").asText(""));
+                item.set("repository", repo);
+                item.set("labels", n.path("labels").path("nodes"));
+                issues.add(item);
             }
         }
         return issues;
     }
 
     boolean wasSelfAssigned(String ownerRepo, int number) {
-        String jq = "[.[] | select(.event == \"assigned\" and .assignee.login == \""
-                + config.githubUser + "\") | .actor.login] | last";
-        String result = ghText(Actor.USER,
-                "api", "repos/" + ownerRepo + "/issues/" + number + "/timeline",
-                "--paginate", "--jq", jq);
-        if (result == null) return false;
-        return result.replace("\"", "").trim().equals(config.githubUser);
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    issue(number: %d) {
+                      timelineItems(itemTypes: ASSIGNED_EVENT, last: 20) {
+                        nodes {
+                          ... on AssignedEvent {
+                            actor { login }
+                            assignee { ... on User { login } }
+                          }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], number));
+        if (data == null) return false;
+        JsonNode items = data.path("repository").path("issue").path("timelineItems").path("nodes");
+        String lastActorForUser = null;
+        for (JsonNode item : items) {
+            if (config.githubUser.equals(item.path("assignee").path("login").asText(""))) {
+                lastActorForUser = item.path("actor").path("login").asText("");
+            }
+        }
+        return config.githubUser.equals(lastActorForUser);
     }
 
     boolean wasEyesReactedByUser(String ownerRepo, int number) {
-        String jq = "[.[] | select(.user.login == \"" + config.githubUser
-                + "\" and .content == \"eyes\")]";
-        String result = ghText(Actor.USER,
-                "api", "repos/" + ownerRepo + "/issues/" + number + "/reactions",
-                "--paginate", "--jq", jq);
-        if (result == null || result.isEmpty()) return false;
-        try {
-            JsonNode arr = mapper.readTree(result);
-            return arr.isArray() && arr.size() > 0;
-        } catch (Exception e) {
-            return false;
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    issueOrPullRequest(number: %d) {
+                      ... on Issue {
+                        reactions(content: EYES, first: 20) {
+                          nodes { user { login } }
+                        }
+                      }
+                      ... on PullRequest {
+                        reactions(content: EYES, first: 20) {
+                          nodes { user { login } }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], number));
+        if (data == null) return false;
+        JsonNode reactions = data.path("repository").path("issueOrPullRequest").path("reactions").path("nodes");
+        for (JsonNode r : reactions) {
+            if (config.githubUser.equals(r.path("user").path("login").asText(""))) {
+                return true;
+            }
         }
+        return false;
     }
 
     boolean alreadyHasPR(String ownerRepo, int issueNumber) {
+        String[] parts = splitOwnerRepo(ownerRepo);
         String branch = "fix/" + issueNumber;
-        JsonNode prs = ghJson(Actor.BOT,
-                "pr", "list",
-                "--repo", ownerRepo,
-                "--head", config.botUser + ":" + branch,
-                "--json", "number");
-        return prs != null && prs.isArray() && prs.size() > 0;
+        JsonNode data = graphql(Actor.BOT, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequests(headRefName: "%s", states: OPEN, first: 5) {
+                      nodes { author { login } }
+                    }
+                } }""", parts[0], parts[1], branch));
+        if (data == null) return false;
+        JsonNode prs = data.path("repository").path("pullRequests").path("nodes");
+        for (JsonNode pr : prs) {
+            if (config.botUser.equals(pr.path("author").path("login").asText(""))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     boolean hasBotReviewThumbsUp(String ownerRepo, int prNumber) {
-        String jq = "[.[] | select(.user.login == \"" + config.botUser + "\") | .id]";
-        String result = ghText(Actor.USER,
-                "api", "repos/" + ownerRepo + "/issues/" + prNumber + "/comments",
-                "--jq", jq);
-        if (result == null || result.isEmpty()) return false;
-        try {
-            JsonNode ids = mapper.readTree(result);
-            for (JsonNode idNode : ids) {
-                long commentId = idNode.asLong();
-                if (hasReactionFromUser(ownerRepo, commentId, "+1")) {
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    issueOrPullRequest(number: %d) {
+                      ... on Issue {
+                        comments(first: 50) {
+                          nodes {
+                            databaseId
+                            author { login }
+                            reactions(content: THUMBS_UP, first: 10) {
+                              nodes { user { login } }
+                            }
+                          }
+                        }
+                      }
+                      ... on PullRequest {
+                        comments(first: 50) {
+                          nodes {
+                            databaseId
+                            author { login }
+                            reactions(content: THUMBS_UP, first: 10) {
+                              nodes { user { login } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], prNumber));
+        if (data == null) return false;
+        JsonNode comments = data.path("repository").path("issueOrPullRequest").path("comments").path("nodes");
+        for (JsonNode c : comments) {
+            if (!config.botUser.equals(c.path("author").path("login").asText(""))) continue;
+            JsonNode reactions = c.path("reactions").path("nodes");
+            for (JsonNode r : reactions) {
+                if (config.githubUser.equals(r.path("user").path("login").asText(""))) {
                     return true;
                 }
             }
-        } catch (Exception ignored) {
         }
         return false;
     }
 
     boolean isPRMerged(String ownerRepo, int prNumber) {
-        JsonNode pr = ghJson(Actor.USER,
-                "pr", "view", String.valueOf(prNumber),
-                "--repo", ownerRepo,
-                "--json", "state");
-        if (pr == null) return false;
-        return "MERGED".equalsIgnoreCase(pr.path("state").asText(""));
+        return "MERGED".equals(getPRState(ownerRepo, prNumber));
     }
 
     boolean isBotReviewRequested(String ownerRepo, int prNumber) {
-        JsonNode pr = ghJson(Actor.USER,
-                "pr", "view", String.valueOf(prNumber),
-                "--repo", ownerRepo,
-                "--json", "reviewRequests");
-        if (pr == null) return false;
-        JsonNode requests = pr.path("reviewRequests");
-        if (!requests.isArray()) return false;
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequest(number: %d) {
+                      reviewRequests(first: 20) {
+                        nodes {
+                          requestedReviewer {
+                            ... on User { login }
+                          }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], prNumber));
+        if (data == null) return false;
+        JsonNode requests = data.path("repository").path("pullRequest").path("reviewRequests").path("nodes");
         for (JsonNode r : requests) {
-            if (config.botUser.equals(r.path("login").asText())) return true;
+            if (config.botUser.equals(r.path("requestedReviewer").path("login").asText(""))) return true;
         }
         return false;
     }
@@ -230,92 +458,55 @@ public class GitHubClient {
             if (scope.contains("/")) {
                 fetchEyesForRepo(scope, results);
             }
-            // Skip whole-org scopes — too many repos to query individually
         }
         return results;
     }
 
     private void fetchEyesForRepo(String ownerRepo, List<JsonNode> results) {
-        String query = """
-                {
-                  search(query: "repo:%s is:open", type: ISSUE, first: 50) {
-                    nodes {
-                      ... on Issue {
-                        number
-                        title
-                        url
-                        __typename
-                      }
-                      ... on PullRequest {
-                        number
-                        title
-                        url
-                        __typename
-                      }
-                    }
-                  }
-                }
-                """.formatted(ownerRepo);
-
-        // Use a simpler approach: search open issues/PRs and check eyes per-item
-        // Actually, use the GraphQL reaction filter directly
-        String gqlQuery = "repo:" + ownerRepo + " is:open";
-
         for (String type : List.of("ISSUE", "PR")) {
             String searchType = "ISSUE".equals(type) ? "is:issue" : "is:pr";
-            String fullQuery = gqlQuery + " " + searchType;
+            String searchQuery = "repo:" + ownerRepo + " is:open " + searchType;
 
-            String graphql = """
-                    {
-                      search(query: "%s", type: ISSUE, first: 30) {
+            JsonNode data = graphqlWithVars(Actor.USER, """
+                    query($q: String!) {
+                      search(query: $q, type: ISSUE, first: 30) {
                         nodes {
                           ... on Issue {
-                            number
-                            title
-                            url
+                            number title url
                             reactions(content: EYES, first: 5) {
                               nodes { user { login } }
                             }
                           }
                           ... on PullRequest {
-                            number
-                            title
-                            url
+                            number title url
                             reactions(content: EYES, first: 5) {
                               nodes { user { login } }
                             }
                           }
                         }
                       }
-                    }
-                    """.formatted(fullQuery);
+                    }""", "q=" + searchQuery);
+            if (data == null) continue;
 
-            String result = ghText(Actor.USER, "api", "graphql", "-f", "query=" + graphql);
-            if (result == null) continue;
-
-            try {
-                JsonNode data = mapper.readTree(result);
-                JsonNode nodes = data.path("data").path("search").path("nodes");
-                for (JsonNode node : nodes) {
-                    JsonNode reactions = node.path("reactions").path("nodes");
-                    boolean hasUserEyes = false;
-                    for (JsonNode r : reactions) {
-                        if (config.githubUser.equals(r.path("user").path("login").asText())) {
-                            hasUserEyes = true;
-                            break;
-                        }
-                    }
-                    if (hasUserEyes) {
-                        var obj = mapper.createObjectNode();
-                        obj.put("number", node.path("number").asInt());
-                        obj.put("title", node.path("title").asText());
-                        obj.put("url", node.path("url").asText());
-                        obj.put("type", "ISSUE".equals(type) ? "issue" : "pr");
-                        obj.put("ownerRepo", ownerRepo);
-                        results.add(obj);
+            JsonNode nodes = data.path("search").path("nodes");
+            for (JsonNode node : nodes) {
+                JsonNode reactions = node.path("reactions").path("nodes");
+                boolean hasUserEyes = false;
+                for (JsonNode r : reactions) {
+                    if (config.githubUser.equals(r.path("user").path("login").asText())) {
+                        hasUserEyes = true;
+                        break;
                     }
                 }
-            } catch (Exception ignored) {
+                if (hasUserEyes) {
+                    ObjectNode obj = mapper.createObjectNode();
+                    obj.put("number", node.path("number").asInt());
+                    obj.put("title", node.path("title").asText());
+                    obj.put("url", node.path("url").asText());
+                    obj.put("type", "ISSUE".equals(type) ? "issue" : "pr");
+                    obj.put("ownerRepo", ownerRepo);
+                    results.add(obj);
+                }
             }
         }
     }
@@ -324,41 +515,86 @@ public class GitHubClient {
 
     List<JsonNode> fetchReviewRequests() {
         String since = LocalDate.now().minusDays(config.lookbackDays).format(DateTimeFormatter.ISO_DATE);
-        JsonNode result = ghJson(Actor.USER,
-                "search", "prs",
-                "--review-requested", config.githubUser,
-                "--state", "open",
-                "--created", ">=" + since,
-                "--limit", "50",
-                "--json", "repository,number,title,url");
-        if (result == null || !result.isArray()) return List.of();
+        String searchQuery = "review-requested:" + config.githubUser + " is:open is:pr created:>=" + since;
+
+        JsonNode data = graphqlWithVars(Actor.USER, """
+                query($q: String!) {
+                  search(query: $q, type: ISSUE, first: 50) {
+                    nodes {
+                      ... on PullRequest {
+                        number title url
+                        repository { nameWithOwner }
+                      }
+                    }
+                  }
+                }""", "q=" + searchQuery);
+        if (data == null) return List.of();
+        JsonNode nodes = data.path("search").path("nodes");
+        if (!nodes.isArray()) return List.of();
+
         List<JsonNode> prs = new ArrayList<>();
-        for (JsonNode n : result) {
+        for (JsonNode n : nodes) {
             String org = n.path("repository").path("nameWithOwner").asText("").split("/")[0];
             if (!config.excludeOrgs.contains(org)) {
-                prs.add(n);
+                ObjectNode item = mapper.createObjectNode();
+                item.put("number", n.path("number").asInt());
+                item.put("title", n.path("title").asText(""));
+                item.put("url", n.path("url").asText(""));
+                ObjectNode repo = mapper.createObjectNode();
+                repo.put("nameWithOwner", n.path("repository").path("nameWithOwner").asText(""));
+                item.set("repository", repo);
+                prs.add(item);
             }
         }
         return prs;
     }
 
-    /**
-     * Fetch headRefName and author for a PR (not available via gh search).
-     */
     JsonNode fetchPRExtras(String ownerRepo, int prNumber) {
-        return ghJson(Actor.USER,
-                "pr", "view", String.valueOf(prNumber),
-                "--repo", ownerRepo,
-                "--json", "headRefName,author");
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequest(number: %d) {
+                      id headRefName
+                      author { login }
+                    }
+                } }""", parts[0], parts[1], prNumber));
+        if (data == null) return null;
+        JsonNode pr = data.path("repository").path("pullRequest");
+        if (pr.isMissingNode()) return null;
+        cacheNodeId("pr:" + ownerRepo + "#" + prNumber, pr.path("id").asText(null));
+
+        ObjectNode result = mapper.createObjectNode();
+        result.put("headRefName", pr.path("headRefName").asText(""));
+        ObjectNode author = mapper.createObjectNode();
+        author.put("login", pr.path("author").path("login").asText(""));
+        result.set("author", author);
+        return result;
     }
 
     boolean wasReviewSelfRequested(String ownerRepo, int prNumber) {
-        String jq = "[.[] | select(.event == \"review_requested\" and .requested_reviewer.login == \""
-                + config.githubUser + "\") | .actor.login] | last";
-        String result = ghText(Actor.USER,
-                "api", "repos/" + ownerRepo + "/issues/" + prNumber + "/timeline",
-                "--paginate", "--jq", jq);
-        return result != null && result.replace("\"", "").trim().equals(config.githubUser);
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequest(number: %d) {
+                      timelineItems(itemTypes: REVIEW_REQUESTED_EVENT, last: 20) {
+                        nodes {
+                          ... on ReviewRequestedEvent {
+                            actor { login }
+                            requestedReviewer { ... on User { login } }
+                          }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], prNumber));
+        if (data == null) return false;
+        JsonNode items = data.path("repository").path("pullRequest").path("timelineItems").path("nodes");
+        String lastActorForUser = null;
+        for (JsonNode item : items) {
+            if (config.githubUser.equals(item.path("requestedReviewer").path("login").asText(""))) {
+                lastActorForUser = item.path("actor").path("login").asText("");
+            }
+        }
+        return config.githubUser.equals(lastActorForUser);
     }
 
     // --- Discovery ---
@@ -367,74 +603,58 @@ public class GitHubClient {
         String since = LocalDate.now().minusDays(config.lookbackDays).format(DateTimeFormatter.ISO_DATE);
         Map<String, WorkflowState.DiscoveryEntry> results = new LinkedHashMap<>();
 
-        // Split orgs into --repo flags and --owner flags (can't mix them in one call)
-        List<String> repoFlags = new ArrayList<>();
-        List<String> ownerFlags = new ArrayList<>();
         for (String scope : config.orgs) {
-            if (scope.contains("/")) {
-                repoFlags.add("--repo");
-                repoFlags.add(scope);
-            } else {
-                ownerFlags.add("--owner");
-                ownerFlags.add(scope);
+            String scopeQualifier = scope.contains("/") ? "repo:" + scope : "org:" + scope;
+
+            // 1. Mentions (issues only)
+            searchAndAddDiscoveries(results, state, "issue", "mention",
+                    "mentions:" + config.githubUser + " created:>=" + since
+                            + " is:open is:issue " + scopeQualifier, 30);
+
+            // 2. Topics — issues without linked PRs
+            for (String topic : config.topics) {
+                searchAndAddDiscoveries(results, state, "issue", topic,
+                        topic + " -linked:pr created:>=" + since
+                                + " is:open is:issue " + scopeQualifier, 15);
             }
-        }
-        // Build list of scope batches to search (one per flag type that has entries)
-        List<List<String>> scopeBatches = new ArrayList<>();
-        if (!repoFlags.isEmpty()) scopeBatches.add(repoFlags);
-        if (!ownerFlags.isEmpty()) scopeBatches.add(ownerFlags);
-        if (scopeBatches.isEmpty()) scopeBatches.add(List.of());
 
-        // 1. Mentions (issues only — PRs not in our list are handled by others)
-        for (List<String> scope : scopeBatches) {
-            List<String> args = new ArrayList<>(List.of("search", "issues",
-                    "--mention", config.githubUser,
-                    "--created", ">=" + since, "--state", "open", "--limit", "30",
-                    "--json", "repository,number,title,url"));
-            args.addAll(scope);
-            addDiscoveries(results, state, "issue", "mention",
-                    ghJson(Actor.USER, args.toArray(new String[0])));
-        }
-
-        // 2. Topics — issues without linked PRs
-        for (String topic : config.topics) {
-            for (List<String> scope : scopeBatches) {
-                List<String> args = new ArrayList<>(List.of("search", "issues",
-                        topic + " -linked:pr",
-                        "--created", ">=" + since, "--state", "open", "--limit", "15",
-                        "--json", "repository,number,title,url"));
-                args.addAll(scope);
-                addDiscoveries(results, state, "issue", topic,
-                        ghJson(Actor.USER, args.toArray(new String[0])));
+            // 3. Topics — PRs from others
+            for (String topic : config.topics) {
+                searchAndAddDiscoveries(results, state, "pr", topic,
+                        topic + " -author:" + config.githubUser + " -author:" + config.botUser
+                                + " created:>=" + since + " is:open is:pr " + scopeQualifier, 15);
             }
-        }
 
-        // 3. Topics — PRs from others that may need review
-        for (String topic : config.topics) {
-            for (List<String> scope : scopeBatches) {
-                List<String> args = new ArrayList<>(List.of("search", "prs",
-                        topic + " -author:" + config.githubUser + " -author:" + config.botUser,
-                        "--created", ">=" + since, "--state", "open", "--limit", "15",
-                        "--json", "repository,number,title,url"));
-                args.addAll(scope);
-                addDiscoveries(results, state, "pr", topic,
-                        ghJson(Actor.USER, args.toArray(new String[0])));
-            }
-        }
-
-        // 4. PRs where user is CC'd by quarkus-bot (search for /cc @user in comments)
-        for (List<String> scope : scopeBatches) {
-            List<String> args = new ArrayList<>(List.of("search", "prs",
-                    "/cc @" + config.githubUser,
-                    "--commenter", "quarkus-bot[bot]",
-                    "--created", ">=" + since, "--state", "open", "--limit", "20",
-                    "--json", "repository,number,title,url"));
-            args.addAll(scope);
-            addDiscoveries(results, state, "pr", "cc'd",
-                    ghJson(Actor.USER, args.toArray(new String[0])));
+            // 4. PRs where user is CC'd by quarkus-bot
+            searchAndAddDiscoveries(results, state, "pr", "cc'd",
+                    "/cc @" + config.githubUser + " commenter:quarkus-bot[bot]"
+                            + " created:>=" + since + " is:open is:pr " + scopeQualifier, 20);
         }
 
         return new ArrayList<>(results.values());
+    }
+
+    private void searchAndAddDiscoveries(Map<String, WorkflowState.DiscoveryEntry> results,
+                                         WorkflowState state, String type, String source,
+                                         String searchQuery, int limit) {
+        JsonNode data = graphqlWithVars(Actor.USER, String.format("""
+                query($q: String!) {
+                  search(query: $q, type: ISSUE, first: %d) {
+                    nodes {
+                      ... on Issue {
+                        number title url
+                        repository { nameWithOwner }
+                      }
+                      ... on PullRequest {
+                        number title url
+                        repository { nameWithOwner }
+                      }
+                    }
+                  }
+                }""", limit), "q=" + searchQuery);
+        if (data == null) return;
+        JsonNode nodes = data.path("search").path("nodes");
+        addDiscoveries(results, state, type, source, nodes);
     }
 
     private void addDiscoveries(Map<String, WorkflowState.DiscoveryEntry> results,
@@ -472,8 +692,20 @@ public class GitHubClient {
     boolean isOrgMember(String ownerRepo, String user) {
         String org = ownerRepo.split("/")[0];
         String cacheKey = org + "/" + user;
-        return orgMemberCache.computeIfAbsent(cacheKey, k ->
-                ghExitCode(Actor.USER, "api", "orgs/" + org + "/members/" + user) == 0);
+        return orgMemberCache.computeIfAbsent(cacheKey, k -> {
+            JsonNode data = graphql(Actor.USER, String.format("""
+                    { organization(login: "%s") {
+                        membersWithRole(first: 1, query: "%s") {
+                          nodes { login }
+                        }
+                    } }""", org, user));
+            if (data == null) return false;
+            JsonNode members = data.path("organization").path("membersWithRole").path("nodes");
+            for (JsonNode m : members) {
+                if (user.equals(m.path("login").asText(""))) return true;
+            }
+            return false;
+        });
     }
 
     private boolean isInAllowedOrgs(String ownerRepo) {
@@ -492,125 +724,251 @@ public class GitHubClient {
     // --- Issue details ---
 
     JsonNode getIssueDetails(String ownerRepo, int number) {
-        return ghJson(Actor.USER,
-                "issue", "view", String.valueOf(number),
-                "--repo", ownerRepo,
-                "--json", "title,body,comments,labels,assignees");
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    issue(number: %d) {
+                      id title body
+                      labels(first: 20) { nodes { name } }
+                      comments(first: 100) { nodes { author { login } body } }
+                      assignees(first: 20) { nodes { login } }
+                    }
+                } }""", parts[0], parts[1], number));
+        if (data == null) return null;
+        JsonNode issue = data.path("repository").path("issue");
+        if (issue.isMissingNode()) return null;
+        cacheNodeId("issue:" + ownerRepo + "#" + number, issue.path("id").asText(null));
+
+        ObjectNode result = mapper.createObjectNode();
+        result.put("title", issue.path("title").asText(""));
+        result.put("body", issue.path("body").asText(""));
+        result.set("labels", issue.path("labels").path("nodes"));
+        result.set("comments", issue.path("comments").path("nodes"));
+        result.set("assignees", issue.path("assignees").path("nodes"));
+        return result;
     }
 
     String getIssueOrPRState(String ownerRepo, int issueNumber, Integer prNumber) {
         if (prNumber != null && prNumber > 0) {
             return getPRState(ownerRepo, prNumber);
         }
-        JsonNode issue = ghJson(Actor.USER,
-                "issue", "view", String.valueOf(issueNumber),
-                "--repo", ownerRepo,
-                "--json", "state");
-        if (issue == null) return "OPEN";
-        String s = issue.path("state").asText("OPEN");
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    issue(number: %d) { state }
+                } }""", parts[0], parts[1], issueNumber));
+        if (data == null) return "OPEN";
+        String s = data.path("repository").path("issue").path("state").asText("OPEN");
         return "CLOSED".equalsIgnoreCase(s) ? "CLOSED" : "OPEN";
     }
 
     String getPRState(String ownerRepo, int prNumber) {
-        JsonNode pr = ghJson(Actor.USER,
-                "pr", "view", String.valueOf(prNumber),
-                "--repo", ownerRepo,
-                "--json", "state");
-        if (pr == null) return "OPEN";
-        String s = pr.path("state").asText("OPEN");
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequest(number: %d) { state }
+                } }""", parts[0], parts[1], prNumber));
+        if (data == null) return "OPEN";
+        String s = data.path("repository").path("pullRequest").path("state").asText("OPEN");
         if ("MERGED".equalsIgnoreCase(s)) return "MERGED";
         if ("CLOSED".equalsIgnoreCase(s)) return "CLOSED";
         return "OPEN";
     }
 
     boolean hasMergeConflicts(String ownerRepo, int prNumber) {
-        JsonNode pr = ghJson(Actor.USER,
-                "pr", "view", String.valueOf(prNumber),
-                "--repo", ownerRepo,
-                "--json", "mergeable");
-        if (pr == null) return false;
-        return "CONFLICTING".equalsIgnoreCase(pr.path("mergeable").asText(""));
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequest(number: %d) { mergeable }
+                } }""", parts[0], parts[1], prNumber));
+        if (data == null) return false;
+        return "CONFLICTING".equalsIgnoreCase(
+                data.path("repository").path("pullRequest").path("mergeable").asText(""));
     }
 
     JsonNode getPRDetails(String ownerRepo, int number) {
-        return ghJson(Actor.USER,
-                "pr", "view", String.valueOf(number),
-                "--repo", ownerRepo,
-                "--json", "title,body,comments,reviews,headRefName,author,state,mergeable,statusCheckRollup");
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequest(number: %d) {
+                      id title body headRefName state mergeable
+                      author { login }
+                      comments(first: 100) { nodes { author { login } body } }
+                      reviews(last: 50) { nodes { author { login } state body } }
+                      commits(last: 1) {
+                        nodes {
+                          commit {
+                            statusCheckRollup {
+                              contexts(first: 100) {
+                                nodes {
+                                  __typename
+                                  ... on CheckRun { name status conclusion detailsUrl }
+                                  ... on StatusContext { context state targetUrl }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], number));
+        if (data == null) return null;
+        JsonNode pr = data.path("repository").path("pullRequest");
+        if (pr.isMissingNode()) return null;
+        cacheNodeId("pr:" + ownerRepo + "#" + number, pr.path("id").asText(null));
+
+        ObjectNode result = mapper.createObjectNode();
+        result.put("title", pr.path("title").asText(""));
+        result.put("body", pr.path("body").asText(""));
+        result.put("headRefName", pr.path("headRefName").asText(""));
+        result.put("state", pr.path("state").asText(""));
+        result.put("mergeable", pr.path("mergeable").asText(""));
+        result.set("author", pr.path("author"));
+        result.set("comments", pr.path("comments").path("nodes"));
+        result.set("reviews", pr.path("reviews").path("nodes"));
+
+        // Flatten statusCheckRollup from commits structure
+        ArrayNode checks = mapper.createArrayNode();
+        JsonNode commits = pr.path("commits").path("nodes");
+        if (commits.isArray() && !commits.isEmpty()) {
+            JsonNode contexts = commits.get(0).path("commit").path("statusCheckRollup")
+                    .path("contexts").path("nodes");
+            if (contexts.isArray()) {
+                for (JsonNode ctx : contexts) {
+                    ObjectNode check = mapper.createObjectNode();
+                    String typename = ctx.path("__typename").asText("");
+                    if ("CheckRun".equals(typename)) {
+                        check.put("status", ctx.path("status").asText(""));
+                        check.put("conclusion", ctx.path("conclusion").asText(""));
+                        check.put("name", ctx.path("name").asText(""));
+                        check.put("detailsUrl", ctx.path("detailsUrl").asText(""));
+                    } else if ("StatusContext".equals(typename)) {
+                        String state = ctx.path("state").asText("");
+                        check.put("status", "SUCCESS".equalsIgnoreCase(state) || "FAILURE".equalsIgnoreCase(state)
+                                || "ERROR".equalsIgnoreCase(state) ? "COMPLETED" : state);
+                        check.put("conclusion", state);
+                        check.put("name", ctx.path("context").asText(""));
+                        check.put("detailsUrl", ctx.path("targetUrl").asText(""));
+                    }
+                    checks.add(check);
+                }
+            }
+        }
+        result.set("statusCheckRollup", checks);
+        return result;
     }
 
     // --- Bot actions ---
 
     Long postComment(String ownerRepo, int number, String body) {
-        String result = ghText(Actor.BOT,
-                "api", "repos/" + ownerRepo + "/issues/" + number + "/comments",
-                "-X", "POST",
-                "-f", "body=" + body);
-        if (result == null) return null;
-        try {
-            return mapper.readTree(result).path("id").asLong();
-        } catch (Exception e) {
-            return null;
-        }
+        String nodeId = getIssueOrPRNodeId(Actor.BOT, ownerRepo, number);
+        if (nodeId == null) return null;
+
+        JsonNode data = graphqlWithVars(Actor.BOT, String.format("""
+                mutation($body: String!) {
+                  addComment(input: {subjectId: "%s", body: $body}) {
+                    commentEdge {
+                      node { databaseId id }
+                    }
+                  }
+                }""", nodeId), "body=" + body);
+        if (data == null) return null;
+        JsonNode comment = data.path("addComment").path("commentEdge").path("node");
+        long dbId = comment.path("databaseId").asLong(0);
+        cacheCommentNodeId(dbId, comment.path("id").asText(null));
+        return dbId > 0 ? dbId : null;
     }
 
     void addReaction(String ownerRepo, long commentId, String reaction) {
-        ghText(Actor.BOT,
-                "api", "repos/" + ownerRepo + "/issues/comments/" + commentId + "/reactions",
-                "-X", "POST",
-                "-f", "content=" + reaction);
+        String nodeId = commentNodeIdCache.get(commentId);
+        if (nodeId == null) return;
+
+        String content = switch (reaction) {
+            case "+1" -> "THUMBS_UP";
+            case "-1" -> "THUMBS_DOWN";
+            case "eyes" -> "EYES";
+            case "heart" -> "HEART";
+            case "rocket" -> "ROCKET";
+            case "hooray" -> "HOORAY";
+            case "laugh" -> "LAUGH";
+            case "confused" -> "CONFUSED";
+            default -> reaction;
+        };
+        graphql(Actor.BOT, String.format("""
+                mutation {
+                  addReaction(input: {subjectId: "%s", content: %s}) {
+                    reaction { content }
+                  }
+                }""", nodeId, content));
     }
 
     // --- Comment reaction checks ---
 
     boolean hasThumbsUpFromUser(String ownerRepo, long commentId) {
-        return hasReactionFromUser(ownerRepo, commentId, "+1");
+        return hasReactionFromUser(ownerRepo, commentId, "THUMBS_UP");
     }
 
     boolean hasThumbsDownFromUser(String ownerRepo, long commentId) {
-        return hasReactionFromUser(ownerRepo, commentId, "-1");
+        return hasReactionFromUser(ownerRepo, commentId, "THUMBS_DOWN");
     }
 
     void minimizeComment(String ownerRepo, long commentId) {
-        String nodeId = ghText(Actor.BOT,
-                "api", "repos/" + ownerRepo + "/issues/comments/" + commentId,
-                "--jq", ".node_id");
-        if (nodeId == null || nodeId.isEmpty()) return;
-        nodeId = nodeId.replace("\"", "").trim();
-        String mutation = "mutation { minimizeComment(input: {subjectId: \""
-                + nodeId + "\", classifier: OUTDATED}) { minimizedComment { isMinimized } } }";
-        ghText(Actor.BOT, "api", "graphql", "-f", "query=" + mutation);
+        String nodeId = commentNodeIdCache.get(commentId);
+        if (nodeId == null) return;
+        graphql(Actor.BOT, String.format("""
+                mutation {
+                  minimizeComment(input: {subjectId: "%s", classifier: OUTDATED}) {
+                    minimizedComment { isMinimized }
+                  }
+                }""", nodeId));
     }
 
-    private boolean hasReactionFromUser(String ownerRepo, long commentId, String content) {
-        String jq = "[.[] | select(.user.login == \"" + config.githubUser
-                + "\" and .content == \"" + content + "\")]";
-        String result = ghText(Actor.USER,
-                "api", "repos/" + ownerRepo + "/issues/comments/" + commentId + "/reactions",
-                "--jq", jq);
-        if (result == null || result.isEmpty()) return false;
-        try {
-            JsonNode arr = mapper.readTree(result);
-            return arr.isArray() && arr.size() > 0;
-        } catch (Exception e) {
-            return false;
+    private boolean hasReactionFromUser(String ownerRepo, long commentId, String reactionContent) {
+        String nodeId = commentNodeIdCache.get(commentId);
+        if (nodeId == null) return false;
+
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { node(id: "%s") {
+                    ... on IssueComment {
+                      reactions(content: %s, first: 20) {
+                        nodes { user { login } }
+                      }
+                    }
+                } }""", nodeId, reactionContent));
+        if (data == null) return false;
+        JsonNode reactions = data.path("node").path("reactions").path("nodes");
+        for (JsonNode r : reactions) {
+            if (config.githubUser.equals(r.path("user").path("login").asText(""))) {
+                return true;
+            }
         }
+        return false;
     }
 
     String getUserCommentAfter(String ownerRepo, int number, long afterCommentId) {
-        String jq = "[.[] | select(.user.login == \"" + config.githubUser + "\") | {id: .id, body: .body}]";
-        String result = ghText(Actor.USER,
-                "api", "repos/" + ownerRepo + "/issues/" + number + "/comments",
-                "--paginate", "--jq", jq);
-        if (result == null) return null;
-        try {
-            JsonNode arr = mapper.readTree(result);
-            for (JsonNode c : arr) {
-                if (c.path("id").asLong() > afterCommentId) {
-                    return c.path("body").asText();
-                }
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    issueOrPullRequest(number: %d) {
+                      ... on Issue {
+                        comments(first: 100) {
+                          nodes { databaseId body author { login } }
+                        }
+                      }
+                      ... on PullRequest {
+                        comments(first: 100) {
+                          nodes { databaseId body author { login } }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], number));
+        if (data == null) return null;
+        JsonNode comments = data.path("repository").path("issueOrPullRequest").path("comments").path("nodes");
+        for (JsonNode c : comments) {
+            if (config.githubUser.equals(c.path("author").path("login").asText(""))
+                    && c.path("databaseId").asLong() > afterCommentId) {
+                return c.path("body").asText();
             }
-        } catch (Exception ignored) {
         }
         return null;
     }
@@ -618,51 +976,100 @@ public class GitHubClient {
     // --- PR operations ---
 
     String createDraftPR(String ownerRepo, String defaultBranch, int issueNumber, String title, String body) {
-        String head = config.botUser + ":fix/" + issueNumber;
-        return ghText(Actor.BOT,
-                "pr", "create",
-                "--repo", ownerRepo,
-                "--base", defaultBranch,
-                "--head", head,
-                "--title", title,
-                "--body", body,
-                "--draft");
+        String upstreamNodeId = getRepoNodeId(Actor.BOT, ownerRepo);
+        if (upstreamNodeId == null) return null;
+
+        String forkRepo = config.botUser + "/" + ownerRepo.split("/")[1];
+        String forkNodeId = getRepoNodeId(Actor.BOT, forkRepo);
+        if (forkNodeId == null) return null;
+
+        String headRef = "fix/" + issueNumber;
+        JsonNode data = graphqlWithVars(Actor.BOT, String.format("""
+                mutation($title: String!, $body: String!) {
+                  createPullRequest(input: {
+                    repositoryId: "%s",
+                    baseRefName: "%s",
+                    headRefName: "%s",
+                    headRepositoryId: "%s",
+                    title: $title,
+                    body: $body,
+                    draft: true
+                  }) {
+                    pullRequest { url id number }
+                  }
+                }""", upstreamNodeId, defaultBranch, headRef, forkNodeId),
+                "title=" + title, "body=" + body);
+        if (data == null) return null;
+        JsonNode pr = data.path("createPullRequest").path("pullRequest");
+        String url = pr.path("url").asText(null);
+        cacheNodeId("pr:" + ownerRepo + "#" + pr.path("number").asInt(), pr.path("id").asText(null));
+        return url;
     }
 
     void markPRReady(String ownerRepo, int prNumber) {
-        ghText(Actor.BOT, "pr", "ready", String.valueOf(prNumber), "--repo", ownerRepo);
+        String prNodeId = getPRNodeId(Actor.BOT, ownerRepo, prNumber);
+        if (prNodeId == null) return;
+        graphql(Actor.BOT, String.format("""
+                mutation {
+                  markPullRequestReadyForReview(input: {pullRequestId: "%s"}) {
+                    pullRequest { isDraft }
+                  }
+                }""", prNodeId));
     }
 
     void addReviewer(String ownerRepo, int prNumber, String reviewer) {
-        ghText(Actor.BOT,
-                "pr", "edit", String.valueOf(prNumber),
-                "--repo", ownerRepo,
-                "--add-reviewer", reviewer);
+        String prNodeId = getPRNodeId(Actor.BOT, ownerRepo, prNumber);
+        if (prNodeId == null) return;
+        String userNodeId = getUserNodeId(Actor.BOT, reviewer);
+        if (userNodeId == null) return;
+        graphql(Actor.BOT, String.format("""
+                mutation {
+                  requestReviews(input: {pullRequestId: "%s", userIds: ["%s"]}) {
+                    pullRequest { id }
+                  }
+                }""", prNodeId, userNodeId));
     }
 
     void requestReview(String ownerRepo, int prNumber, String reviewer) {
-        // Use USER token — bot doesn't have permission to request reviewers on upstream
-        ghText(Actor.USER,
-                "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/requested_reviewers",
-                "-X", "POST",
-                "-f", "reviewers[]=" + reviewer);
+        String prNodeId = getPRNodeId(Actor.USER, ownerRepo, prNumber);
+        if (prNodeId == null) return;
+        String userNodeId = getUserNodeId(Actor.USER, reviewer);
+        if (userNodeId == null) return;
+        graphql(Actor.USER, String.format("""
+                mutation {
+                  requestReviews(input: {pullRequestId: "%s", userIds: ["%s"]}) {
+                    pullRequest { id }
+                  }
+                }""", prNodeId, userNodeId));
     }
 
     void postPRReview(String ownerRepo, int prNumber, String body) {
-        ghText(Actor.BOT,
-                "pr", "review", String.valueOf(prNumber),
-                "--repo", ownerRepo,
-                "--comment",
-                "--body", body);
+        String prNodeId = getPRNodeId(Actor.BOT, ownerRepo, prNumber);
+        if (prNodeId == null) return;
+        graphqlWithVars(Actor.BOT, String.format("""
+                mutation($body: String!) {
+                  addPullRequestReview(input: {pullRequestId: "%s", body: $body, event: COMMENT}) {
+                    pullRequestReview { id }
+                  }
+                }""", prNodeId), "body=" + body);
     }
 
     // --- PR status checks ---
 
     JsonNode getPRReviews(String ownerRepo, int prNumber) {
-        return ghJson(Actor.USER,
-                "pr", "view", String.valueOf(prNumber),
-                "--repo", ownerRepo,
-                "--json", "reviews");
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequest(number: %d) {
+                      reviews(last: 50) {
+                        nodes { author { login } state body }
+                      }
+                    }
+                } }""", parts[0], parts[1], prNumber));
+        if (data == null) return null;
+        ObjectNode result = mapper.createObjectNode();
+        result.set("reviews", data.path("repository").path("pullRequest").path("reviews").path("nodes"));
+        return result;
     }
 
     enum ReviewVerdict { APPROVED, CHANGES_REQUESTED, NONE }
@@ -673,7 +1080,6 @@ public class GitHubClient {
         JsonNode reviews = data.path("reviews");
         if (!reviews.isArray()) return ReviewVerdict.NONE;
 
-        // Check the latest review from the user first
         String userLatest = null;
         for (JsonNode r : reviews) {
             if (config.githubUser.equals(r.path("author").path("login").asText())) {
@@ -683,7 +1089,6 @@ public class GitHubClient {
         if ("APPROVED".equals(userLatest)) return ReviewVerdict.APPROVED;
         if ("CHANGES_REQUESTED".equals(userLatest)) return ReviewVerdict.CHANGES_REQUESTED;
 
-        // Also check reviews from trusted users (org members)
         for (JsonNode r : reviews) {
             String reviewer = r.path("author").path("login").asText("");
             if (reviewer.equals(config.botUser)) continue;
@@ -697,156 +1102,195 @@ public class GitHubClient {
         return ReviewVerdict.NONE;
     }
 
-    /**
-     * Get all actionable feedback on a PR. This includes:
-     * - Comments from the user
-     * - Comments from other users that the user has thumbsup'd (endorsing the feedback)
-     * - Review comments from any reviewer (not just the user)
-     * - Review body text from any reviewer
-     * All filtered to exclude items the bot has already reacted to.
-     */
     List<JsonNode> getUnprocessedPRComments(String ownerRepo, int prNumber) {
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequest(number: %d) {
+                      comments(first: 100) {
+                        nodes {
+                          databaseId id body createdAt
+                          author { login }
+                          reactions(first: 30) {
+                            nodes { user { login } content }
+                          }
+                        }
+                      }
+                      reviewThreads(first: 50) {
+                        nodes {
+                          id
+                          comments(first: 20) {
+                            nodes {
+                              databaseId id body path createdAt
+                              author { login }
+                              reactions(first: 30) {
+                                nodes { user { login } content }
+                              }
+                            }
+                          }
+                        }
+                      }
+                      reviews(last: 50) {
+                        nodes {
+                          databaseId id body state
+                          author { login }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], prNumber));
+        if (data == null) return List.of();
+        JsonNode pr = data.path("repository").path("pullRequest");
+
         List<JsonNode> unprocessed = new ArrayList<>();
 
-        // 1. Issue comments (conversation tab) — from user OR thumbsup'd by user
-        String jq = "[.[] | select(.user.login != \"" + config.botUser
-                + "\") | {id: .id, body: .body, user: .user.login, created_at: .created_at, type: \"issue\"}]";
-        String result = ghText(Actor.USER,
-                "api", "repos/" + ownerRepo + "/issues/" + prNumber + "/comments",
-                "--paginate", "--jq", jq);
-        if (result != null) {
-            try {
-                for (JsonNode c : mapper.readTree(result)) {
-                    if (hasBotReaction(ownerRepo, c.path("id").asLong(), "issues")) continue;
-                    String author = c.path("user").asText("");
-                    if (author.equals(config.githubUser) || hasUserThumbsUp(ownerRepo, c.path("id").asLong(), "issues")) {
-                        unprocessed.add(c);
-                    }
-                }
-            } catch (Exception ignored) {
+        // 1. Issue comments — from user OR thumbsup'd by user, not already reacted by bot
+        for (JsonNode c : pr.path("comments").path("nodes")) {
+            String author = c.path("author").path("login").asText("");
+            if (author.equals(config.botUser)) continue;
+
+            long dbId = c.path("databaseId").asLong();
+            cacheCommentNodeId(dbId, c.path("id").asText(null));
+
+            if (hasReactionInline(c, config.botUser, "THUMBS_UP")) continue;
+
+            if (author.equals(config.githubUser) || hasReactionInline(c, config.githubUser, "THUMBS_UP")) {
+                ObjectNode item = mapper.createObjectNode();
+                item.put("id", dbId);
+                item.put("body", c.path("body").asText(""));
+                item.put("user", author);
+                item.put("created_at", c.path("createdAt").asText(""));
+                item.put("type", "issue");
+                unprocessed.add(item);
             }
         }
 
-        // 2. PR review comments (line-level) — from user OR thumbsup'd by user
-        String jq2 = "[.[] | select(.user.login != \"" + config.botUser
-                + "\") | {id: .id, body: .body, path: .path, user: .user.login, created_at: .created_at, type: \"review\"}]";
-        String result2 = ghText(Actor.USER,
-                "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/comments",
-                "--paginate", "--jq", jq2);
-        if (result2 != null) {
-            try {
-                for (JsonNode c : mapper.readTree(result2)) {
-                    if (hasBotReaction(ownerRepo, c.path("id").asLong(), "pulls")) continue;
-                    String author = c.path("user").asText("");
-                    if (author.equals(config.githubUser) || hasUserThumbsUp(ownerRepo, c.path("id").asLong(), "pulls")) {
-                        unprocessed.add(c);
-                    }
+        // 2. PR review comments — from user OR thumbsup'd by user
+        for (JsonNode thread : pr.path("reviewThreads").path("nodes")) {
+            for (JsonNode c : thread.path("comments").path("nodes")) {
+                String author = c.path("author").path("login").asText("");
+                if (author.equals(config.botUser)) continue;
+
+                long dbId = c.path("databaseId").asLong();
+                cacheCommentNodeId(dbId, c.path("id").asText(null));
+
+                if (hasReactionInline(c, config.botUser, "THUMBS_UP")) continue;
+
+                if (author.equals(config.githubUser) || hasReactionInline(c, config.githubUser, "THUMBS_UP")) {
+                    ObjectNode item = mapper.createObjectNode();
+                    item.put("id", dbId);
+                    item.put("body", c.path("body").asText(""));
+                    item.put("path", c.path("path").asText(""));
+                    item.put("user", author);
+                    item.put("created_at", c.path("createdAt").asText(""));
+                    item.put("type", "review");
+                    unprocessed.add(item);
                 }
-            } catch (Exception ignored) {
             }
         }
 
         // 3. PR review body text — from user OR trusted reviewer with CHANGES_REQUESTED
-        String jq3 = "[.[] | select(.user.login != \"" + config.botUser
-                + "\" and .body != \"\" and .body != null) | {id: .id, body: .body, state: .state, user: .user.login}]";
-        String result3 = ghText(Actor.USER,
-                "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/reviews",
-                "--jq", jq3);
-        if (result3 != null) {
-            try {
-                for (JsonNode c : mapper.readTree(result3)) {
-                    String author = c.path("user").asText("");
-                    String state = c.path("state").asText("");
-                    if (author.equals(config.githubUser)) {
-                        unprocessed.add(c);
-                    } else if ("CHANGES_REQUESTED".equals(state) && isOrgMember(ownerRepo, author)) {
-                        unprocessed.add(c);
-                    }
-                }
-            } catch (Exception ignored) {
+        for (JsonNode r : pr.path("reviews").path("nodes")) {
+            String author = r.path("author").path("login").asText("");
+            if (author.equals(config.botUser)) continue;
+            String body = r.path("body").asText("");
+            if (body.isEmpty()) continue;
+
+            if (author.equals(config.githubUser)) {
+                ObjectNode item = mapper.createObjectNode();
+                item.put("id", r.path("databaseId").asLong());
+                item.put("body", body);
+                item.put("state", r.path("state").asText(""));
+                item.put("user", author);
+                unprocessed.add(item);
+            } else if ("CHANGES_REQUESTED".equals(r.path("state").asText("")) && isOrgMember(ownerRepo, author)) {
+                ObjectNode item = mapper.createObjectNode();
+                item.put("id", r.path("databaseId").asLong());
+                item.put("body", body);
+                item.put("state", r.path("state").asText(""));
+                item.put("user", author);
+                unprocessed.add(item);
             }
         }
 
         return unprocessed;
     }
 
-    private boolean hasUserThumbsUp(String ownerRepo, long commentId, String commentType) {
-        String endpoint = "issues".equals(commentType)
-                ? "repos/" + ownerRepo + "/issues/comments/" + commentId + "/reactions"
-                : "repos/" + ownerRepo + "/pulls/comments/" + commentId + "/reactions";
-        String rjq = "[.[] | select(.user.login == \"" + config.githubUser
-                + "\" and .content == \"+1\")]";
-        String rResult = ghText(Actor.USER, "api", endpoint, "--jq", rjq);
-        if (rResult == null || rResult.isEmpty()) return false;
-        try {
-            JsonNode arr = mapper.readTree(rResult);
-            return arr.isArray() && arr.size() > 0;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
     List<JsonNode> getUnrepliedReviewComments(String ownerRepo, int prNumber) {
-        String jq = "[.[] | {id: .id, body: .body, user: .user.login, in_reply_to_id: .in_reply_to_id}]";
-        String result = ghText(Actor.USER,
-                "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/comments",
-                "--paginate", "--jq", jq);
-        if (result == null) return List.of();
-        try {
-            JsonNode all = mapper.readTree(result);
-            // Find comment IDs that the bot has already replied to
-            java.util.Set<Long> repliedTo = new java.util.HashSet<>();
-            for (JsonNode c : all) {
-                if (config.botUser.equals(c.path("user").asText(""))) {
-                    long replyTo = c.path("in_reply_to_id").asLong(0);
-                    if (replyTo > 0) repliedTo.add(replyTo);
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequest(number: %d) {
+                      reviewThreads(first: 50) {
+                        nodes {
+                          id
+                          comments(first: 20) {
+                            nodes {
+                              databaseId id body
+                              author { login }
+                            }
+                          }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], prNumber));
+        if (data == null) return List.of();
+        JsonNode pr = data.path("repository").path("pullRequest");
+
+        List<JsonNode> unreplied = new ArrayList<>();
+        for (JsonNode thread : pr.path("reviewThreads").path("nodes")) {
+            String threadNodeId = thread.path("id").asText("");
+            JsonNode comments = thread.path("comments").path("nodes");
+
+            if (!comments.isArray() || comments.isEmpty()) continue;
+
+            JsonNode firstComment = comments.get(0);
+            String firstAuthor = firstComment.path("author").path("login").asText("");
+            if (firstAuthor.equals(config.botUser)) continue;
+
+            boolean botReplied = false;
+            for (JsonNode c : comments) {
+                if (config.botUser.equals(c.path("author").path("login").asText(""))) {
+                    botReplied = true;
+                    break;
                 }
             }
-            // Return top-level comments from non-bot users that have no bot reply
-            List<JsonNode> unreplied = new ArrayList<>();
-            for (JsonNode c : all) {
-                String user = c.path("user").asText("");
-                if (user.equals(config.botUser)) continue;
-                long id = c.path("id").asLong();
-                long replyTo = c.path("in_reply_to_id").asLong(0);
-                if (replyTo == 0 && !repliedTo.contains(id)) {
-                    unreplied.add(c);
-                }
+
+            if (!botReplied) {
+                long dbId = firstComment.path("databaseId").asLong();
+                cacheCommentNodeId(dbId, firstComment.path("id").asText(null));
+                reviewThreadIdCache.put(dbId, threadNodeId);
+
+                ObjectNode item = mapper.createObjectNode();
+                item.put("id", dbId);
+                item.put("body", firstComment.path("body").asText(""));
+                item.put("user", firstAuthor);
+                unreplied.add(item);
             }
-            return unreplied;
-        } catch (Exception e) {
-            return List.of();
         }
+
+        return unreplied;
     }
 
     void replyToPRComment(String ownerRepo, int prNumber, long commentId, String body) {
-        ghText(Actor.BOT,
-                "api", "repos/" + ownerRepo + "/pulls/" + prNumber + "/comments/" + commentId + "/replies",
-                "-X", "POST",
-                "-f", "body=" + body);
+        String threadNodeId = reviewThreadIdCache.get(commentId);
+        if (threadNodeId == null) return;
+        graphqlWithVars(Actor.BOT, String.format("""
+                mutation($body: String!) {
+                  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: "%s", body: $body}) {
+                    comment { id }
+                  }
+                }""", threadNodeId), "body=" + body);
     }
 
     void reactToPRComment(String ownerRepo, long commentId) {
-        ghText(Actor.BOT,
-                "api", "repos/" + ownerRepo + "/pulls/comments/" + commentId + "/reactions",
-                "-X", "POST",
-                "-f", "content=+1");
-    }
-
-    private boolean hasBotReaction(String ownerRepo, long commentId, String commentType) {
-        String endpoint = "issues".equals(commentType)
-                ? "repos/" + ownerRepo + "/issues/comments/" + commentId + "/reactions"
-                : "repos/" + ownerRepo + "/pulls/comments/" + commentId + "/reactions";
-        String rjq = "[.[] | select(.user.login == \"" + config.botUser
-                + "\" and .content == \"+1\")]";
-        String rResult = ghText(Actor.BOT, "api", endpoint, "--jq", rjq);
-        if (rResult == null || rResult.isEmpty()) return false;
-        try {
-            JsonNode arr = mapper.readTree(rResult);
-            return arr.isArray() && arr.size() > 0;
-        } catch (Exception e) {
-            return false;
-        }
+        String nodeId = commentNodeIdCache.get(commentId);
+        if (nodeId == null) return;
+        graphql(Actor.BOT, String.format("""
+                mutation {
+                  addReaction(input: {subjectId: "%s", content: THUMBS_UP}) {
+                    reaction { content }
+                  }
+                }""", nodeId));
     }
 
     // --- CI checks ---
@@ -854,26 +1298,59 @@ public class GitHubClient {
     enum CIStatus { PASS, FAIL, PENDING }
 
     CIStatus getCIStatus(String ownerRepo, int prNumber) {
-        JsonNode data = ghJson(Actor.USER,
-                "pr", "view", String.valueOf(prNumber),
-                "--repo", ownerRepo,
-                "--json", "statusCheckRollup");
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequest(number: %d) {
+                      commits(last: 1) {
+                        nodes {
+                          commit {
+                            statusCheckRollup {
+                              contexts(first: 100) {
+                                nodes {
+                                  __typename
+                                  ... on CheckRun { status conclusion }
+                                  ... on StatusContext { state }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], prNumber));
         if (data == null) return CIStatus.PENDING;
-        JsonNode checks = data.path("statusCheckRollup");
-        if (!checks.isArray() || checks.isEmpty()) return CIStatus.PENDING;
+
+        JsonNode commits = data.path("repository").path("pullRequest").path("commits").path("nodes");
+        if (!commits.isArray() || commits.isEmpty()) return CIStatus.PENDING;
+        JsonNode contexts = commits.get(0).path("commit").path("statusCheckRollup")
+                .path("contexts").path("nodes");
+        if (!contexts.isArray() || contexts.isEmpty()) return CIStatus.PENDING;
 
         boolean anyFailed = false;
         boolean anyPending = false;
-        for (JsonNode check : checks) {
-            String status = check.path("status").asText("");
-            String conclusion = check.path("conclusion").asText("");
-            if ("COMPLETED".equalsIgnoreCase(status)) {
-                if (!"SUCCESS".equalsIgnoreCase(conclusion) && !"NEUTRAL".equalsIgnoreCase(conclusion)
-                        && !"SKIPPED".equalsIgnoreCase(conclusion)) {
+        for (JsonNode check : contexts) {
+            String typename = check.path("__typename").asText("");
+            if ("CheckRun".equals(typename)) {
+                String status = check.path("status").asText("");
+                String conclusion = check.path("conclusion").asText("");
+                if ("COMPLETED".equalsIgnoreCase(status)) {
+                    if (!"SUCCESS".equalsIgnoreCase(conclusion) && !"NEUTRAL".equalsIgnoreCase(conclusion)
+                            && !"SKIPPED".equalsIgnoreCase(conclusion)) {
+                        anyFailed = true;
+                    }
+                } else {
+                    anyPending = true;
+                }
+            } else if ("StatusContext".equals(typename)) {
+                String state = check.path("state").asText("");
+                if ("SUCCESS".equalsIgnoreCase(state)) {
+                    // pass
+                } else if ("PENDING".equalsIgnoreCase(state) || "EXPECTED".equalsIgnoreCase(state)) {
+                    anyPending = true;
+                } else {
                     anyFailed = true;
                 }
-            } else {
-                anyPending = true;
             }
         }
         if (anyFailed) return CIStatus.FAIL;
@@ -882,19 +1359,52 @@ public class GitHubClient {
     }
 
     String getCIFailureDetails(String ownerRepo, int prNumber) {
-        JsonNode data = ghJson(Actor.USER,
-                "pr", "checks", String.valueOf(prNumber),
-                "--repo", ownerRepo,
-                "--json", "name,state,conclusion,detailsUrl");
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    pullRequest(number: %d) {
+                      commits(last: 1) {
+                        nodes {
+                          commit {
+                            statusCheckRollup {
+                              contexts(first: 100) {
+                                nodes {
+                                  __typename
+                                  ... on CheckRun { name conclusion detailsUrl }
+                                  ... on StatusContext { context state targetUrl }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                } }""", parts[0], parts[1], prNumber));
         if (data == null) return "Could not fetch CI details";
+
+        JsonNode commits = data.path("repository").path("pullRequest").path("commits").path("nodes");
+        if (!commits.isArray() || commits.isEmpty()) return "Could not fetch CI details";
+        JsonNode contexts = commits.get(0).path("commit").path("statusCheckRollup")
+                .path("contexts").path("nodes");
+
         StringBuilder sb = new StringBuilder();
-        if (data.isArray()) {
-            for (JsonNode check : data) {
-                String conclusion = check.path("conclusion").asText("");
-                if ("FAILURE".equalsIgnoreCase(conclusion) || "ERROR".equalsIgnoreCase(conclusion)) {
-                    sb.append("- ").append(check.path("name").asText("?"))
-                            .append(": ").append(conclusion)
-                            .append(" (").append(check.path("detailsUrl").asText("")).append(")\n");
+        if (contexts.isArray()) {
+            for (JsonNode check : contexts) {
+                String typename = check.path("__typename").asText("");
+                if ("CheckRun".equals(typename)) {
+                    String conclusion = check.path("conclusion").asText("");
+                    if ("FAILURE".equalsIgnoreCase(conclusion) || "ERROR".equalsIgnoreCase(conclusion)) {
+                        sb.append("- ").append(check.path("name").asText("?"))
+                                .append(": ").append(conclusion)
+                                .append(" (").append(check.path("detailsUrl").asText("")).append(")\n");
+                    }
+                } else if ("StatusContext".equals(typename)) {
+                    String state = check.path("state").asText("");
+                    if ("FAILURE".equalsIgnoreCase(state) || "ERROR".equalsIgnoreCase(state)) {
+                        sb.append("- ").append(check.path("context").asText("?"))
+                                .append(": ").append(state)
+                                .append(" (").append(check.path("targetUrl").asText("")).append(")\n");
+                    }
                 }
             }
         }
@@ -902,16 +1412,19 @@ public class GitHubClient {
     }
 
     // --- Repo operations (worktree-based) ---
-    //
-    // Instead of full clones per issue, we keep a persistent "main" clone per repo
-    // under {workDir}/repos/{owner}/{repo}/ and create lightweight git worktrees
-    // under {workDir}/worktrees/{owner}_{repo}_{issue}/ for each issue.
-    // For Quarkus/Maven projects, each worktree gets an isolated .m2 directory
-    // so SNAPSHOT builds don't pollute each other.
 
     String getDefaultBranch(String ownerRepo) {
-        String result = ghText(Actor.USER, "api", "repos/" + ownerRepo, "--jq", ".default_branch");
-        return (result != null && !result.isEmpty()) ? result.replace("\"", "").trim() : "main";
+        String[] parts = splitOwnerRepo(ownerRepo);
+        JsonNode data = graphql(Actor.USER, String.format("""
+                { repository(owner: "%s", name: "%s") {
+                    id
+                    defaultBranchRef { name }
+                } }""", parts[0], parts[1]));
+        if (data == null) return "main";
+        JsonNode repo = data.path("repository");
+        cacheNodeId("repo:" + ownerRepo, repo.path("id").asText(null));
+        String name = repo.path("defaultBranchRef").path("name").asText("");
+        return name.isEmpty() ? "main" : name;
     }
 
     private Path mainCloneDir(String ownerRepo) {
@@ -926,15 +1439,10 @@ public class GitHubClient {
         return config.workDir.resolve("m2").resolve(ownerRepo.replace("/", "_") + "_" + number);
     }
 
-    /**
-     * Ensure we have a persistent main clone of the repo with both the bot's fork (origin)
-     * and the upstream repo as remotes. If it already exists, just fetch.
-     */
     private Path ensureMainClone(String ownerRepo) throws IOException {
         Path mainDir = mainCloneDir(ownerRepo);
 
         if (java.nio.file.Files.isDirectory(mainDir.resolve(".git"))) {
-            // Check if this clone was properly set up (has upstream remote)
             String remotes = git(Actor.BOT, mainDir, "remote");
             if (remotes == null || !remotes.contains("upstream")) {
                 System.out.println("  Main clone missing upstream remote, recreating...");
@@ -961,7 +1469,6 @@ public class GitHubClient {
             return null;
         }
 
-        // Switch origin to HTTPS with embedded token so git push works
         git(Actor.BOT, mainDir, "remote", "set-url", "origin", httpsOrigin);
         git(Actor.BOT, mainDir, "remote", "add", "upstream", httpsUpstream);
         disableGPGSigning(mainDir);
@@ -974,10 +1481,6 @@ public class GitHubClient {
         return mainDir;
     }
 
-    /**
-     * Set up Maven dependency isolation for a worktree by creating
-     * .mvn/maven.config with a worktree-scoped local repo.
-     */
     private void disableGPGSigning(Path wtDir) {
         git(Actor.BOT, wtDir, "config", "commit.gpgsign", "false");
     }
@@ -994,7 +1497,6 @@ public class GitHubClient {
         if (!existing.contains("-Dmaven.repo.local=")) {
             java.nio.file.Files.writeString(mvnConfig,
                     existing.stripTrailing() + "\n-Dmaven.repo.local=" + m2Dir.toAbsolutePath() + "\n");
-            // Tell git to ignore this change so it never leaks into commits
             git(Actor.BOT, wtDir, "update-index", "--assume-unchanged", ".mvn/maven.config");
         }
     }
@@ -1009,12 +1511,8 @@ public class GitHubClient {
         String defaultBranch = getDefaultBranch(ownerRepo);
         String branch = "fix/" + issueNumber;
 
-        // Delete stale branch from a previous attempt if it exists
         git(Actor.BOT, mainDir, "branch", "-D", branch);
 
-        // Base on origin/main (the fork) so push only sends our commits.
-        // Basing on upstream/main would require pushing upstream commits the fork
-        // doesn't have, which fails if any touch .github/workflows/ (needs workflow PAT scope).
         git(Actor.BOT, mainDir, "fetch", "origin", defaultBranch);
         java.nio.file.Files.createDirectories(wtDir.getParent());
         String result = git(Actor.BOT, mainDir,
@@ -1040,8 +1538,6 @@ public class GitHubClient {
         git(Actor.BOT, mainDir, "fetch", "origin", defaultBranch);
         git(Actor.BOT, mainDir, "fetch", "origin", branch);
 
-        // Always reset local branch to origin's version to avoid stale state
-        // from previous runs (e.g. squashed commits that include upstream changes)
         java.nio.file.Files.createDirectories(wtDir.getParent());
         String result = git(Actor.BOT, mainDir,
                 "worktree", "add", wtDir.toAbsolutePath().toString(),
@@ -1057,7 +1553,6 @@ public class GitHubClient {
     Path cloneForReview(String ownerRepo, int prNumber, String headBranch, String author) throws IOException {
         Path wtDir = worktreeDir(ownerRepo, prNumber);
 
-        // For reviews, we need a clone with the PR checked out — use the upstream repo
         Path mainDir = mainCloneDir(ownerRepo);
         if (!java.nio.file.Files.isDirectory(mainDir.resolve(".git"))) {
             java.nio.file.Files.createDirectories(mainDir.getParent());
@@ -1068,7 +1563,6 @@ public class GitHubClient {
 
         removeWorktree(mainDir, wtDir);
 
-        // Delete stale PR branch and fetch fresh from upstream (PR refs are on upstream, not the bot's fork)
         git(Actor.USER, mainDir, "branch", "-D", "pr-" + prNumber);
         git(Actor.USER, mainDir, "fetch", "upstream", "pull/" + prNumber + "/head:pr-" + prNumber);
 
@@ -1091,16 +1585,10 @@ public class GitHubClient {
             git(Actor.BOT, repoDir, "commit", "-m", "WIP: stage changes before push");
         }
 
-        // No rebase — branch is based on origin/main so push only sends our commits.
-        // Rebasing on upstream/main would pull in upstream commits the fork doesn't have,
-        // which fails if any touch .github/workflows/ (needs workflow PAT scope).
         String result = git(Actor.BOT, repoDir, "push", "--force-with-lease", "-u", "origin", branch);
         return result != null;
     }
 
-    /**
-     * Clean up a worktree. Safe to call even if the worktree doesn't exist.
-     */
     void cleanupWorktree(String ownerRepo, int number) {
         Path mainDir = mainCloneDir(ownerRepo);
         Path wtDir = worktreeDir(ownerRepo, number);
